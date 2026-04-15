@@ -273,6 +273,9 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
       trace.setLabel('fast_path', 'scheduled_runtime');
     }
     if (payload === null) {
+      if (skipInitialFreshnessCheck) {
+        console.log('homepage refresh fast compute: full_compute_fallback reason=fast_path_miss');
+      }
       const computed = trace
         ? await trace.timeAsync(
             'homepage_refresh_compute',

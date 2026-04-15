@@ -1959,6 +1959,7 @@ export async function tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates
     }),
   );
   if (patched) {
+    console.log(`homepage refresh fast compute: patched_direct monitors=${patched.monitors.length}`);
     return patched;
   }
 
@@ -1974,6 +1975,7 @@ export async function tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates
       runtimeSnapshot: runtimeSnapshot ?? null,
     })
   ) {
+    console.log('homepage refresh fast compute: full_compute_fallback reason=runtime_snapshot_miss');
     return null;
   }
 
@@ -1988,6 +1990,10 @@ export async function tryComputePublicHomepagePayloadFromScheduledRuntimeUpdates
         runtimeSnapshot,
         ...(opts.trace ? { trace: opts.trace } : {}),
       }),
+  );
+
+  console.log(
+    `homepage refresh fast compute: runtime_snapshot monitors=${monitorData.monitors.length}`,
   );
 
   return {

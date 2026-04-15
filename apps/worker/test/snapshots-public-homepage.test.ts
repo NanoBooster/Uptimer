@@ -497,6 +497,37 @@ describe('snapshots/public-homepage', () => {
     });
   });
 
+  it('keeps using the valid homepage row when an equal-age artifact row is corrupted', async () => {
+    const now = 1_728_000_500;
+    const payload = samplePayload(now - 60);
+    const db = createFakeD1Database([
+      {
+        match: 'select key, generated_at, updated_at, body_json from public_snapshots',
+        all: () => [
+          {
+            key: 'homepage',
+            generated_at: payload.generated_at,
+            updated_at: payload.generated_at,
+            body_json: JSON.stringify(payload),
+          },
+          {
+            key: 'homepage:artifact',
+            generated_at: payload.generated_at,
+            updated_at: payload.generated_at,
+            body_json:
+              '{"generated_at":190,"preload_html":"<div>bad</div>","snapshot":{"generated_at":190',
+          },
+        ],
+      },
+    ]);
+
+    await expect(readHomepageRefreshBaseSnapshot(db, now)).resolves.toEqual({
+      generatedAt: payload.generated_at,
+      snapshot: payload,
+      seedDataSnapshot: false,
+    });
+  });
+
   it('ignores future-dated refresh snapshot candidates', async () => {
     const now = 1_728_000_500;
     const validPayload = samplePayload(now - 60);

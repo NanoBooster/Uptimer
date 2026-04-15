@@ -87,7 +87,7 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
   }
 
   try {
-    const { readHomepageSnapshotGeneratedAt } = trace
+    const { readHomepageSnapshotGeneratedAt, readHomepageSnapshotJsonAnyAge } = trace
       ? await trace.timeAsync(
           'import_homepage_snapshot_read_module',
           async () => await import('./snapshots/public-homepage-read'),
@@ -167,6 +167,26 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
       );
     }
 
+    const baseSnapshotBodyJson = trace
+      ? await trace.timeAsync(
+          'homepage_refresh_read_snapshot_base',
+          async () =>
+            (
+              await readHomepageSnapshotJsonAnyAge(
+                env.DB,
+                now,
+                10 * 60,
+              )
+            )?.bodyJson ?? null,
+        )
+      : (
+          await readHomepageSnapshotJsonAnyAge(
+            env.DB,
+            now,
+            10 * 60,
+          )
+        )?.bodyJson ?? null;
+
     const [homepageMod, snapshotMod] = await Promise.all([
       trace
         ? trace.timeAsync('import_homepage_module', async () => await import('./public/homepage'))
@@ -181,9 +201,13 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
     const computed = trace
       ? await trace.timeAsync(
           'homepage_refresh_compute',
-          async () => await homepageMod.computePublicHomepagePayload(env.DB, now, { trace }),
+          async () =>
+            await homepageMod.computePublicHomepagePayload(env.DB, now, {
+              trace,
+              baseSnapshotBodyJson,
+            }),
         )
-      : await homepageMod.computePublicHomepagePayload(env.DB, now);
+      : await homepageMod.computePublicHomepagePayload(env.DB, now, { baseSnapshotBodyJson });
     const payload = trace
       ? trace.time('homepage_refresh_validate', () =>
           snapshotMod.toHomepageSnapshotPayload(computed),

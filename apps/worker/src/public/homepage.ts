@@ -1,4 +1,7 @@
-import type { PublicHomepageResponse } from '../schemas/public-homepage';
+import {
+  publicHomepageResponseSchema,
+  type PublicHomepageResponse,
+} from '../schemas/public-homepage';
 import type { PublicStatusResponse } from '../schemas/public-status';
 import type { Trace } from '../observability/trace';
 import {
@@ -99,6 +102,27 @@ function safeParseJsonArray<T>(text: string | null): T[] {
   } catch {
     return [];
   }
+}
+
+function parseHomepageSnapshotBodyJson(bodyJson: string | null | undefined): PublicHomepageResponse | null {
+  if (!bodyJson) return null;
+  try {
+    const parsed = JSON.parse(bodyJson) as unknown;
+    const validated = publicHomepageResponseSchema.safeParse(parsed);
+    return validated.success ? validated.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function canReuseStaticHomepageSections(snapshot: PublicHomepageResponse): boolean {
+  return (
+    snapshot.active_incidents.length === 0 &&
+    snapshot.maintenance_windows.active.length === 0 &&
+    snapshot.maintenance_windows.upcoming.length === 0 &&
+    snapshot.resolved_incident_preview === null &&
+    snapshot.maintenance_history_preview === null
+  );
 }
 
 function toHeartbeatStatusCode(status: string | null | undefined): string {
@@ -998,20 +1022,33 @@ export function homepageFromStatusPayload(
 export async function computePublicHomepagePayload(
   db: D1Database,
   now: number,
-  opts: { trace?: Trace } = {},
+  opts: { trace?: Trace; baseSnapshotBodyJson?: string | null } = {},
 ): Promise<PublicHomepageResponse> {
   const trace = opts.trace;
   const includeHiddenMonitors = false;
-  const settingsPromise = withTraceAsync(
-    trace,
-    'homepage_settings',
-    async () => await readPublicSiteSettings(db),
-  );
-  const maintenanceWindowsPromise = withTraceAsync(
-    trace,
-    'homepage_maintenance_windows',
-    async () => await listVisibleMaintenanceWindows(db, now, includeHiddenMonitors),
-  );
+  const baseSnapshot = parseHomepageSnapshotBodyJson(opts.baseSnapshotBodyJson);
+  const reuseStaticSections =
+    baseSnapshot !== null && canReuseStaticHomepageSections(baseSnapshot);
+  const reusedSettings = reuseStaticSections
+    ? {
+        site_title: baseSnapshot.site_title,
+        site_description: baseSnapshot.site_description,
+        site_locale: baseSnapshot.site_locale,
+        site_timezone: baseSnapshot.site_timezone,
+        uptime_rating_level: baseSnapshot.uptime_rating_level as 1 | 2 | 3 | 4 | 5,
+      }
+    : null;
+
+  const settingsPromise = reusedSettings
+    ? Promise.resolve(reusedSettings)
+    : withTraceAsync(trace, 'homepage_settings', async () => await readPublicSiteSettings(db));
+  const maintenanceWindowsPromise = reuseStaticSections
+    ? Promise.resolve({ active: [], upcoming: [] })
+    : withTraceAsync(
+        trace,
+        'homepage_maintenance_windows',
+        async () => await listVisibleMaintenanceWindows(db, now, includeHiddenMonitors),
+      );
 
   const [settings, monitorData, activeIncidents, maintenanceWindows, historyPreviews] =
     await Promise.all([
@@ -1033,13 +1070,20 @@ export async function computePublicHomepagePayload(
       withTraceAsync(
         trace,
         'homepage_active_incidents',
-        async () => await listVisibleActiveIncidents(db, includeHiddenMonitors),
+        async () =>
+          reuseStaticSections ? [] : await listVisibleActiveIncidents(db, includeHiddenMonitors),
       ),
       maintenanceWindowsPromise,
       withTraceAsync(
         trace,
         'homepage_history_previews',
-        async () => await readHomepageHistoryPreviews(db, now, trace),
+        async () =>
+          reuseStaticSections
+            ? {
+                resolvedIncidentPreview: null,
+                maintenanceHistoryPreview: null,
+              }
+            : await readHomepageHistoryPreviews(db, now, trace),
       ),
     ]);
 

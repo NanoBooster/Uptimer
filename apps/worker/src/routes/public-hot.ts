@@ -8,17 +8,6 @@ import {
   applyTraceToResponse,
   resolveTraceOptions,
 } from '../observability/trace';
-import {
-  applyHomepageCacheHeaders,
-  readHomepageSnapshotJsonAnyAge,
-  readHomepageSnapshotArtifactJson,
-  readStaleHomepageSnapshotArtifactJson,
-} from '../snapshots/public-homepage-read';
-import {
-  applyStatusCacheHeaders,
-  readStatusSnapshotJson,
-  readStaleStatusSnapshotJson,
-} from '../snapshots/public-status-read';
 
 const HOMEPAGE_STALE_GRACE_SECONDS = 2 * 60;
 
@@ -71,6 +60,9 @@ function rewritePublicRequest(req: Request): Request {
 export const publicHotRoutes = new Hono<{ Bindings: Env }>();
 
 publicHotRoutes.get('/homepage', async (c) => {
+  const { applyHomepageCacheHeaders, readHomepageSnapshotJsonAnyAge } = await import(
+    '../snapshots/public-homepage-read'
+  );
   const now = Math.floor(Date.now() / 1000);
   const trace = new Trace(
     resolveTraceOptions({
@@ -100,6 +92,11 @@ publicHotRoutes.get('/homepage', async (c) => {
 });
 
 publicHotRoutes.get('/homepage-artifact', async (c) => {
+  const {
+    applyHomepageCacheHeaders,
+    readHomepageSnapshotArtifactJson,
+    readStaleHomepageSnapshotArtifactJson,
+  } = await import('../snapshots/public-homepage-read');
   const now = Math.floor(Date.now() / 1000);
   const trace = new Trace(
     resolveTraceOptions({
@@ -143,6 +140,8 @@ publicHotRoutes.get('/homepage-artifact', async (c) => {
 });
 
 publicHotRoutes.get('/status', async (c) => {
+  const { applyStatusCacheHeaders, readStatusSnapshotJson, readStaleStatusSnapshotJson } =
+    await import('../snapshots/public-status-read');
   const now = Math.floor(Date.now() / 1000);
   const includeHiddenMonitors = hasValidAdminTokenRequest(c);
   const trace = new Trace(

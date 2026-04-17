@@ -1,17 +1,6 @@
 import type { Env } from './env';
 import { AppError } from './middleware/errors';
 import type { Trace } from './observability/trace';
-import {
-  applyHomepageCacheHeaders,
-  readHomepageSnapshotArtifactJson,
-  readHomepageSnapshotJsonAnyAge,
-  readStaleHomepageSnapshotArtifactJson,
-} from './snapshots/public-homepage-read';
-import {
-  applyStatusCacheHeaders,
-  readStatusSnapshotJson,
-  readStaleStatusSnapshotJson,
-} from './snapshots/public-status-read';
 
 const CORS_ALLOW_METHODS = 'GET,POST,PUT,PATCH,DELETE,OPTIONS';
 const CORS_ALLOW_HEADERS = 'Authorization,Content-Type';
@@ -158,6 +147,11 @@ async function applyTrace(res: Response, trace: Trace | null, prefix: string): P
 }
 
 async function handlePublicHomepageArtifact(req: Request, env: Env): Promise<Response> {
+  const {
+    applyHomepageCacheHeaders,
+    readHomepageSnapshotArtifactJson,
+    readStaleHomepageSnapshotArtifactJson,
+  } = await import('./snapshots/public-homepage-read');
   const now = Math.floor(Date.now() / 1000);
   const trace = await resolveTrace(req, env);
   if (trace) {
@@ -212,6 +206,9 @@ async function handlePublicHomepageArtifact(req: Request, env: Env): Promise<Res
 }
 
 async function handlePublicHomepage(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const { applyHomepageCacheHeaders, readHomepageSnapshotJsonAnyAge } = await import(
+    './snapshots/public-homepage-read'
+  );
   const now = Math.floor(Date.now() / 1000);
   const trace = await resolveTrace(req, env);
   if (trace) {
@@ -244,6 +241,8 @@ async function handlePublicHomepage(req: Request, env: Env, ctx: ExecutionContex
 }
 
 async function handlePublicStatus(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const { applyStatusCacheHeaders, readStatusSnapshotJson, readStaleStatusSnapshotJson } =
+    await import('./snapshots/public-status-read');
   const now = Math.floor(Date.now() / 1000);
   const includeHiddenMonitors = hasValidAdminToken(req, env);
   const trace = await resolveTrace(req, env);

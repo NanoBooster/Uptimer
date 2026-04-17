@@ -121,6 +121,18 @@ function canonicalHotPublicPathname(pathname: string): string {
   }
 }
 
+function isPublicUiPath(url: URL): boolean {
+  const pathname = canonicalHotPublicPathname(url.pathname);
+  if (pathname === '/api/v1/public/incidents') return true;
+  if (pathname === '/api/v1/public/maintenance-windows') return true;
+  if (/^\/api\/v1\/public\/monitors\/\d+\/day-context$/.test(pathname)) return true;
+  if (/^\/api\/v1\/public\/monitors\/\d+\/outages$/.test(pathname)) return true;
+  return (
+    /^\/api\/v1\/public\/monitors\/\d+\/latency$/.test(pathname) &&
+    url.searchParams.get('format') === 'compact-v1'
+  );
+}
+
 function normalizeTruthyHeader(value: string | null): boolean {
   if (!value) return false;
   const normalized = value.trim().toLowerCase();
@@ -402,6 +414,11 @@ export async function handleFetch(request: Request, env: Env, ctx: ExecutionCont
     }
     if (hotPathname === '/api/v1/public/status') {
       const res = await handlePublicStatus(request, env, ctx);
+      return applyCorsHeaders(res, origin);
+    }
+    if (request.method === 'GET' && isPublicUiPath(url)) {
+      const { publicUiRoutes } = await import('./routes/public-ui');
+      const res = await publicUiRoutes.fetch(rewritePublicRequest(request), env, ctx);
       return applyCorsHeaders(res, origin);
     }
   } catch (err) {

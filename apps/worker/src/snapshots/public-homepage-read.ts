@@ -1,10 +1,11 @@
 import { AppError } from '../middleware/errors';
 import {
-  publicHomepageResponseSchema,
-  publicHomepageStoredRenderArtifactSchema,
-  storedPublicHomepageResponseSchema,
   type PublicHomepageResponse,
 } from '../schemas/public-homepage';
+import {
+  publicHomepageStoredRenderArtifactSchema,
+  storedPublicHomepageResponseSchema,
+} from '../schemas/public-homepage-stored';
 
 const SNAPSHOT_KEY = 'homepage';
 const SNAPSHOT_ARTIFACT_KEY = 'homepage:artifact';
@@ -148,22 +149,30 @@ function parseDirectHomepagePayload(value: unknown): PublicHomepageResponse | nu
   if (storedPayload.success) {
     return storedPayload.data;
   }
-
-  const directPayload = publicHomepageResponseSchema.safeParse(value);
-  if (directPayload.success) {
-    return directPayload.data;
-  }
   if (!isRecord(value)) {
     return null;
   }
 
-  const normalizedPayload = publicHomepageResponseSchema.safeParse({
-    ...value,
+  const normalizedPayload = storedPublicHomepageResponseSchema.safeParse({
+    generated_at: value.generated_at,
     bootstrap_mode:
       value.bootstrap_mode === 'full' || value.bootstrap_mode === 'partial'
         ? value.bootstrap_mode
         : 'full',
     monitor_count_total: Array.isArray(value.monitors) ? value.monitors.length : 0,
+    site_title: value.site_title,
+    site_description: value.site_description,
+    site_locale: value.site_locale,
+    site_timezone: value.site_timezone,
+    uptime_rating_level: value.uptime_rating_level,
+    overall_status: value.overall_status,
+    banner: value.banner,
+    summary: value.summary,
+    monitors: value.monitors,
+    active_incidents: value.active_incidents,
+    maintenance_windows: value.maintenance_windows,
+    resolved_incident_preview: value.resolved_incident_preview ?? null,
+    maintenance_history_preview: value.maintenance_history_preview ?? null,
   });
   return normalizedPayload.success ? normalizedPayload.data : null;
 }

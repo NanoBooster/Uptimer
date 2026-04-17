@@ -16,7 +16,6 @@ import {
   filterStatusPageScopedMonitorIds,
   incidentStatusPageVisibilityPredicate,
   listStatusPageVisibleMonitorIds,
-  maintenanceWindowStatusPageVisibilityPredicate,
   monitorVisibilityPredicate,
   shouldIncludeStatusPageScopedItem,
 } from '../public/visibility';
@@ -348,13 +347,6 @@ function rangeToSeconds(
   }
 }
 
-function p95(values: number[]): number | null {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const idx = Math.max(0, Math.min(sorted.length - 1, Math.ceil(0.95 * sorted.length) - 1));
-  return sorted[idx] ?? null;
-}
-
 type IncidentRow = {
   id: number;
   title: string;
@@ -543,6 +535,335 @@ async function listMaintenanceWindowMonitorIdsByWindowId(
   }
 
   return byWindow;
+}
+
+function jsonNumberLiteral(value: number | null | undefined): string {
+  return typeof value === 'number' && Number.isFinite(value) ? String(Math.round(value)) : 'null';
+}
+
+function jsonArrayLiteral(value: string | null | undefined): string {
+  if (typeof value !== 'string') return '[]';
+  const trimmed = value.trim();
+  return trimmed.startsWith('[') && trimmed.endsWith(']') ? trimmed : '[]';
+}
+
+async function buildLatencyResponseJson(opts: {
+  db: D1Database;
+  monitor: { id: number; name: string };
+  range: z.infer<typeof latencyRangeSchema>;
+  rangeStart: number;
+  rangeEnd: number;
+}): Promise<string> {
+  const row = await opts.db
+    .prepare(
+      `
+        WITH ordered_points AS (
+          SELECT
+            checked_at,
+            CASE status
+              WHEN 'up' THEN 'up'
+              WHEN 'down' THEN 'down'
+              WHEN 'maintenance' THEN 'maintenance'
+              WHEN 'unknown' THEN 'unknown'
+              ELSE 'unknown'
+            END AS status,
+            latency_ms
+          FROM check_results
+          WHERE monitor_id = ?1
+            AND checked_at >= ?2
+            AND checked_at <= ?3
+          ORDER BY checked_at
+        ),
+        up_latencies AS (
+          SELECT
+            latency_ms,
+            row_number() OVER (ORDER BY latency_ms) AS rn,
+            count(*) OVER () AS cnt
+          FROM ordered_points
+          WHERE status = 'up'
+            AND latency_ms IS NOT NULL
+        )
+        SELECT
+          COALESCE(
+            (
+              SELECT json_group_array(
+                json_object(
+                  'checked_at', checked_at,
+                  'status', status,
+                  'latency_ms', latency_ms
+                )
+              )
+              FROM ordered_points
+            ),
+            '[]'
+          ) AS points_json,
+          CAST(round((SELECT avg(latency_ms) FROM up_latencies)) AS INTEGER) AS avg_latency_ms,
+          (
+            SELECT latency_ms
+            FROM up_latencies
+            WHERE rn = ((95 * cnt + 99) / 100)
+            LIMIT 1
+          ) AS p95_latency_ms
+      `,
+    )
+    .bind(opts.monitor.id, opts.rangeStart, opts.rangeEnd)
+    .first<{
+      points_json: string | null;
+      avg_latency_ms: number | null;
+      p95_latency_ms: number | null;
+    }>();
+
+  const monitorJson = JSON.stringify({
+    id: opts.monitor.id,
+    name: opts.monitor.name,
+  });
+
+  return `{"monitor":${monitorJson},"range":"${opts.range}","range_start_at":${opts.rangeStart},"range_end_at":${opts.rangeEnd},"avg_latency_ms":${jsonNumberLiteral(row?.avg_latency_ms)},"p95_latency_ms":${jsonNumberLiteral(row?.p95_latency_ms)},"points":${jsonArrayLiteral(row?.points_json)}}`;
+}
+
+async function resolveUptimeRangeStartFromDb(opts: {
+  db: D1Database;
+  monitorId: number;
+  rangeStart: number;
+  rangeEnd: number;
+  monitorCreatedAt: number;
+  lastCheckedAt: number | null;
+}): Promise<number | null> {
+  const monitorRangeStart = Math.max(opts.rangeStart, opts.monitorCreatedAt);
+  if (opts.rangeEnd <= monitorRangeStart) return null;
+
+  if (monitorRangeStart > opts.rangeStart) {
+    const firstCheck = await opts.db
+      .prepare(
+        `
+          SELECT checked_at
+          FROM check_results
+          WHERE monitor_id = ?1
+            AND checked_at >= ?2
+            AND checked_at < ?3
+          ORDER BY checked_at
+          LIMIT 1
+        `,
+      )
+      .bind(opts.monitorId, monitorRangeStart, opts.rangeEnd)
+      .first<{ checked_at: number }>();
+
+    if (typeof firstCheck?.checked_at === 'number') {
+      return firstCheck.checked_at;
+    }
+
+    return opts.lastCheckedAt === null ? null : monitorRangeStart;
+  }
+
+  return monitorRangeStart;
+}
+
+function addUptimeTotals(
+  target: { total_sec: number; downtime_sec: number; unknown_sec: number; uptime_sec: number },
+  source: { total_sec: number; downtime_sec: number; unknown_sec: number; uptime_sec: number },
+): void {
+  target.total_sec += source.total_sec;
+  target.downtime_sec += source.downtime_sec;
+  target.unknown_sec += source.unknown_sec;
+  target.uptime_sec += source.uptime_sec;
+}
+
+async function computeUptimeWindowTotalsFromRollups(opts: {
+  db: D1Database;
+  monitor: {
+    id: number;
+    interval_sec: number;
+    created_at: number;
+    last_checked_at: number | null;
+  };
+  rangeStart: number;
+  rangeEnd: number;
+}): Promise<{ total_sec: number; downtime_sec: number; unknown_sec: number; uptime_sec: number }> {
+  const totals = {
+    total_sec: 0,
+    downtime_sec: 0,
+    unknown_sec: 0,
+    uptime_sec: 0,
+  };
+  if (opts.rangeEnd <= opts.rangeStart) {
+    return totals;
+  }
+
+  const startDay = Math.floor(opts.rangeStart / 86400) * 86400;
+  const endDay = Math.floor(opts.rangeEnd / 86400) * 86400;
+
+  if (startDay === endDay) {
+    return computePartialUptimeTotals(
+      opts.db,
+      opts.monitor.id,
+      opts.monitor.interval_sec,
+      opts.monitor.created_at,
+      opts.monitor.last_checked_at,
+      opts.rangeStart,
+      opts.rangeEnd,
+    );
+  }
+
+  const startPartialEnd = Math.min(opts.rangeEnd, startDay + 86400);
+  if (opts.rangeStart < startPartialEnd) {
+    addUptimeTotals(
+      totals,
+      await computePartialUptimeTotals(
+        opts.db,
+        opts.monitor.id,
+        opts.monitor.interval_sec,
+        opts.monitor.created_at,
+        opts.monitor.last_checked_at,
+        opts.rangeStart,
+        startPartialEnd,
+      ),
+    );
+  }
+
+  const fullDaysStart = Math.max(startDay + 86400, opts.rangeStart);
+  const fullDaysEnd = endDay;
+  if (fullDaysStart < fullDaysEnd) {
+    const rollup = await opts.db
+      .prepare(
+        `
+          SELECT
+            SUM(total_sec) AS total_sec,
+            SUM(downtime_sec) AS downtime_sec,
+            SUM(unknown_sec) AS unknown_sec,
+            SUM(uptime_sec) AS uptime_sec
+          FROM monitor_daily_rollups
+          WHERE monitor_id = ?1
+            AND day_start_at >= ?2
+            AND day_start_at < ?3
+        `,
+      )
+      .bind(opts.monitor.id, fullDaysStart, fullDaysEnd)
+      .first<{
+        total_sec: number | null;
+        downtime_sec: number | null;
+        unknown_sec: number | null;
+        uptime_sec: number | null;
+      }>();
+
+    addUptimeTotals(totals, {
+      total_sec: rollup?.total_sec ?? 0,
+      downtime_sec: rollup?.downtime_sec ?? 0,
+      unknown_sec: rollup?.unknown_sec ?? 0,
+      uptime_sec: rollup?.uptime_sec ?? 0,
+    });
+  }
+
+  if (endDay < opts.rangeEnd) {
+    addUptimeTotals(
+      totals,
+      await computePartialUptimeTotals(
+        opts.db,
+        opts.monitor.id,
+        opts.monitor.interval_sec,
+        opts.monitor.created_at,
+        opts.monitor.last_checked_at,
+        endDay,
+        opts.rangeEnd,
+      ),
+    );
+  }
+
+  return totals;
+}
+
+async function listPublicMaintenanceWindowsPage(opts: {
+  db: D1Database;
+  now: number;
+  limit: number;
+  cursor: number | undefined;
+  includeHiddenMonitors: boolean;
+}): Promise<{
+  maintenance_windows: Array<ReturnType<typeof maintenanceWindowRowToApi>>;
+  next_cursor: number | null;
+}> {
+  const limitPlusOne = opts.limit + 1;
+  const batchLimit = Math.max(50, limitPlusOne);
+  let seekCursor = opts.cursor;
+  const collected: Array<{ row: MaintenanceWindowRow; monitorIds: number[] }> = [];
+
+  while (collected.length < limitPlusOne) {
+    const { results: windowRows } = seekCursor
+      ? await opts.db
+          .prepare(
+            `
+              SELECT id, title, message, starts_at, ends_at, created_at
+              FROM maintenance_windows
+              WHERE ends_at <= ?1
+                AND id < ?3
+              ORDER BY id DESC
+              LIMIT ?2
+            `,
+          )
+          .bind(opts.now, batchLimit, seekCursor)
+          .all<MaintenanceWindowRow>()
+      : await opts.db
+          .prepare(
+            `
+              SELECT id, title, message, starts_at, ends_at, created_at
+              FROM maintenance_windows
+              WHERE ends_at <= ?1
+              ORDER BY id DESC
+              LIMIT ?2
+            `,
+          )
+          .bind(opts.now, batchLimit)
+          .all<MaintenanceWindowRow>();
+
+    const allWindows = windowRows ?? [];
+    if (allWindows.length === 0) {
+      break;
+    }
+
+    const monitorIdsByWindowId = await listMaintenanceWindowMonitorIdsByWindowId(
+      opts.db,
+      allWindows.map((window) => window.id),
+    );
+    const linkedMonitorIds = [...monitorIdsByWindowId.values()].flat();
+    const visibleMonitorIds =
+      opts.includeHiddenMonitors || linkedMonitorIds.length === 0
+        ? new Set<number>()
+        : await listStatusPageVisibleMonitorIds(opts.db, linkedMonitorIds);
+
+    for (const row of allWindows) {
+      const originalMonitorIds = monitorIdsByWindowId.get(row.id) ?? [];
+      const filteredMonitorIds = filterStatusPageScopedMonitorIds(
+        originalMonitorIds,
+        visibleMonitorIds,
+        opts.includeHiddenMonitors,
+      );
+      if (!shouldIncludeStatusPageScopedItem(originalMonitorIds, filteredMonitorIds)) {
+        continue;
+      }
+      collected.push({ row, monitorIds: filteredMonitorIds });
+      if (collected.length >= limitPlusOne) {
+        break;
+      }
+    }
+
+    const lastRow = allWindows[allWindows.length - 1];
+    if (allWindows.length < batchLimit || !lastRow) {
+      break;
+    }
+    seekCursor = lastRow.id;
+  }
+
+  const maintenanceWindows = collected
+    .slice(0, opts.limit)
+    .map(({ row, monitorIds }) => maintenanceWindowRowToApi(row, monitorIds));
+  const next_cursor =
+    collected.length > opts.limit
+      ? (collected[opts.limit - 1]?.row.id ?? null)
+      : null;
+
+  return {
+    maintenance_windows: maintenanceWindows,
+    next_cursor,
+  };
 }
 
 publicRoutes.get('/status', async (c) => {
@@ -950,82 +1271,17 @@ publicRoutes.get('/maintenance-windows', async (c) => {
   const cursor = z.coerce.number().int().positive().optional().parse(c.req.query('cursor'));
 
   const now = Math.floor(Date.now() / 1000);
-  const maintenanceVisibilitySql = maintenanceWindowStatusPageVisibilityPredicate(
-    includeHiddenMonitors,
-  );
-  const baseSql = `
-    SELECT id, title, message, starts_at, ends_at, created_at
-    FROM maintenance_windows
-    WHERE ends_at <= ?1
-      AND ${maintenanceVisibilitySql}
-  `;
-  const limitPlusOne = limit + 1;
-  const batchLimit = Math.max(50, limitPlusOne);
-  let seekCursor = cursor;
-  const collected: MaintenanceWindowRow[] = [];
-
-  while (collected.length < limitPlusOne) {
-    const { results: windowRows } = seekCursor
-      ? await c.env.DB.prepare(
-          `
-            ${baseSql}
-              AND id < ?3
-            ORDER BY id DESC
-            LIMIT ?2
-          `,
-        )
-          .bind(now, batchLimit, seekCursor)
-          .all<MaintenanceWindowRow>()
-      : await c.env.DB.prepare(
-          `
-            ${baseSql}
-            ORDER BY id DESC
-            LIMIT ?2
-          `,
-        )
-          .bind(now, batchLimit)
-          .all<MaintenanceWindowRow>();
-
-    const allWindows = windowRows ?? [];
-    if (allWindows.length === 0) break;
-
-    collected.push(...allWindows);
-
-    const lastRow = allWindows[allWindows.length - 1];
-    if (allWindows.length < batchLimit || !lastRow) break;
-    seekCursor = lastRow.id;
-  }
-
-  const windows = collected.slice(0, limit);
-  const next_cursor = collected.length > limit ? (windows[windows.length - 1]?.id ?? null) : null;
-
-  const monitorIdsByWindowId = await listMaintenanceWindowMonitorIdsByWindowId(
-    c.env.DB,
-    windows.map((w) => w.id),
-  );
-
-  const visibleMonitorIds = includeHiddenMonitors
-    ? new Set<number>()
-    : await listStatusPageVisibleMonitorIds(c.env.DB, [...monitorIdsByWindowId.values()].flat());
 
   return withVisibilityAwareCaching(
-    c.json({
-      maintenance_windows: windows.flatMap((w) => {
-        const originalMonitorIds = monitorIdsByWindowId.get(w.id) ?? [];
-        const filteredMonitorIds = filterStatusPageScopedMonitorIds(
-          originalMonitorIds,
-          visibleMonitorIds,
-          includeHiddenMonitors,
-        );
-
-        if (!shouldIncludeStatusPageScopedItem(originalMonitorIds, filteredMonitorIds)) {
-          return [];
-        }
-
-        return [maintenanceWindowRowToApi(w, filteredMonitorIds)];
+    c.json(
+      await listPublicMaintenanceWindowsPage({
+        db: c.env.DB,
+        now,
+        limit,
+        cursor,
+        includeHiddenMonitors,
       }),
-      next_cursor,
-    }),
+    ),
     includeHiddenMonitors,
   );
 });
@@ -1067,10 +1323,6 @@ publicRoutes.get('/monitors/:id/day-context', async (c) => {
     .all<MaintenanceWindowRow>();
 
   const maintenance = maintenanceRows ?? [];
-  const monitorIdsByWindowId = await listMaintenanceWindowMonitorIdsByWindowId(
-    c.env.DB,
-    maintenance.map((w) => w.id),
-  );
 
   const { results: incidentRows } = await c.env.DB.prepare(
     `
@@ -1088,21 +1340,47 @@ publicRoutes.get('/monitors/:id/day-context', async (c) => {
     .all<IncidentRow>();
 
   const incidents = incidentRows ?? [];
-  const updatesByIncidentId = await listIncidentUpdatesByIncidentId(
-    c.env.DB,
-    incidents.map((r) => r.id),
-  );
-  const monitorIdsByIncidentId = await listIncidentMonitorIdsByIncidentId(
-    c.env.DB,
-    incidents.map((r) => r.id),
-  );
+  if (maintenance.length === 0 && incidents.length === 0) {
+    return withVisibilityAwareCaching(
+      c.json({
+        day_start_at: dayStartAt,
+        day_end_at: dayEndAt,
+        maintenance_windows: [],
+        incidents: [],
+      }),
+      includeHiddenMonitors,
+    );
+  }
+
+  const [monitorIdsByWindowId, updatesByIncidentId, monitorIdsByIncidentId] = await Promise.all([
+    maintenance.length > 0
+      ? listMaintenanceWindowMonitorIdsByWindowId(
+          c.env.DB,
+          maintenance.map((w) => w.id),
+        )
+      : Promise.resolve(new Map<number, number[]>()),
+    incidents.length > 0
+      ? listIncidentUpdatesByIncidentId(
+          c.env.DB,
+          incidents.map((r) => r.id),
+        )
+      : Promise.resolve(new Map<number, IncidentUpdateRow[]>()),
+    incidents.length > 0
+      ? listIncidentMonitorIdsByIncidentId(
+          c.env.DB,
+          incidents.map((r) => r.id),
+        )
+      : Promise.resolve(new Map<number, number[]>()),
+  ]);
 
   const visibleMonitorIds = includeHiddenMonitors
     ? new Set<number>()
-    : await listStatusPageVisibleMonitorIds(
-        c.env.DB,
-        [...monitorIdsByWindowId.values(), ...monitorIdsByIncidentId.values()].flat(),
-      );
+    : await (async () => {
+        const scopedMonitorIds = [...monitorIdsByWindowId.values(), ...monitorIdsByIncidentId.values()].flat();
+        return scopedMonitorIds.length === 0
+          ? new Set<number>()
+          : listStatusPageVisibleMonitorIds(c.env.DB, scopedMonitorIds);
+      })();
 
   return withVisibilityAwareCaching(
     c.json({
@@ -1164,50 +1442,19 @@ publicRoutes.get('/monitors/:id/latency', async (c) => {
   const now = Math.floor(Date.now() / 1000);
   const rangeEnd = Math.floor(now / 60) * 60;
   const rangeStart = rangeEnd - rangeToSeconds(range);
-
-  const { results } = await c.env.DB.prepare(
-    `
-      SELECT checked_at, status, latency_ms
-      FROM check_results
-      WHERE monitor_id = ?1
-        AND checked_at >= ?2
-        AND checked_at <= ?3
-      ORDER BY checked_at
-    `,
-  )
-    .bind(id, rangeStart, rangeEnd)
-    .all<{ checked_at: number; status: string; latency_ms: number | null }>();
-
-  const points = (results ?? []).map((r) => ({
-    checked_at: r.checked_at,
-    status: toCheckStatus(r.status),
-    latency_ms: r.latency_ms,
-  }));
-
-  const upLatencies = points
-    .filter((p) => p.status === 'up' && typeof p.latency_ms === 'number')
-    .map((p) => p.latency_ms as number);
-
-  const avg_latency_ms =
-    upLatencies.length === 0
-      ? null
-      : Math.round(upLatencies.reduce((acc, v) => acc + v, 0) / upLatencies.length);
-
-  return withVisibilityAwareCaching(
-    c.json({
-      monitor: { id: monitor.id, name: monitor.name },
-      range,
-      range_start_at: rangeStart,
-      range_end_at: rangeEnd,
-      avg_latency_ms,
-      p95_latency_ms: p95(upLatencies),
-      points,
-    }),
-    includeHiddenMonitors,
-  );
+  const bodyJson = await buildLatencyResponseJson({
+    db: c.env.DB,
+    monitor,
+    range,
+    rangeStart,
+    rangeEnd,
+  });
+  const res = new Response(bodyJson, {
+    status: 200,
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+  });
+  return withVisibilityAwareCaching(res, includeHiddenMonitors);
 });
-
-type OutageRow = { started_at: number; ended_at: number | null };
 
 function resolveUptimeRangeStart(
   rangeStart: number,
@@ -1265,32 +1512,14 @@ publicRoutes.get('/monitors/:id/uptime', async (c) => {
   const rangeEnd = Math.floor(now / 60) * 60;
   const requestedRangeStart = rangeEnd - rangeToSeconds(range);
   const rangeStart = Math.max(requestedRangeStart, monitor.created_at);
-
-  const checksStart = rangeStart - monitor.interval_sec * 2;
-  const { results: checkRows } = await c.env.DB.prepare(
-    `
-      SELECT checked_at, status
-      FROM check_results
-      WHERE monitor_id = ?1
-        AND checked_at >= ?2
-        AND checked_at < ?3
-      ORDER BY checked_at
-    `,
-  )
-    .bind(id, checksStart, rangeEnd)
-    .all<{ checked_at: number; status: string }>();
-
-  const checks = (checkRows ?? []).map((r) => ({
-    checked_at: r.checked_at,
-    status: toCheckStatus(r.status),
-  }));
-  const effectiveRangeStart = resolveUptimeRangeStart(
+  const effectiveRangeStart = await resolveUptimeRangeStartFromDb({
+    db: c.env.DB,
+    monitorId: id,
     rangeStart,
     rangeEnd,
-    monitor.created_at,
-    monitor.last_checked_at,
-    checks,
-  );
+    monitorCreatedAt: monitor.created_at,
+    lastCheckedAt: monitor.last_checked_at,
+  });
   const rangeStartAt = effectiveRangeStart ?? rangeStart;
   if (effectiveRangeStart === null || rangeEnd <= effectiveRangeStart) {
     return withVisibilityAwareCaching(
@@ -1309,50 +1538,18 @@ publicRoutes.get('/monitors/:id/uptime', async (c) => {
     );
   }
 
-  const total_sec = rangeEnd - effectiveRangeStart;
-  const { results: outageRows } = await c.env.DB.prepare(
-    `
-      SELECT started_at, ended_at
-      FROM outages
-      WHERE monitor_id = ?1
-        AND started_at < ?2
-        AND (ended_at IS NULL OR ended_at > ?3)
-      ORDER BY started_at
-    `,
-  )
-    .bind(id, rangeEnd, effectiveRangeStart)
-    .all<OutageRow>();
-
-  const downtimeIntervals = mergeIntervals(
-    (outageRows ?? [])
-      .map((r) => {
-        const start = Math.max(r.started_at, effectiveRangeStart);
-        const end = Math.min(r.ended_at ?? rangeEnd, rangeEnd);
-        return { start, end };
-      })
-      .filter((it) => it.end > it.start),
-  );
-  const downtime_sec = sumIntervals(downtimeIntervals);
-
-  const checksForUnknown =
-    effectiveRangeStart > rangeStart
-      ? checks.filter((check) => check.checked_at >= effectiveRangeStart)
-      : checks;
-  const unknownIntervals = buildUnknownIntervals(
-    effectiveRangeStart,
-    rangeEnd,
-    monitor.interval_sec,
-    checksForUnknown,
-  );
-
-  // Unknown time is treated as "unavailable" per Application.md; exclude overlap with downtime to avoid double counting.
-  const unknown_sec = Math.max(
-    0,
-    sumIntervals(unknownIntervals) - overlapSeconds(unknownIntervals, downtimeIntervals),
-  );
-
-  const unavailable_sec = Math.min(total_sec, downtime_sec + unknown_sec);
-  const uptime_sec = Math.max(0, total_sec - unavailable_sec);
+  const { total_sec, downtime_sec, unknown_sec, uptime_sec } =
+    await computeUptimeWindowTotalsFromRollups({
+      db: c.env.DB,
+      monitor: {
+        id: monitor.id,
+        interval_sec: monitor.interval_sec,
+        created_at: monitor.created_at,
+        last_checked_at: monitor.last_checked_at,
+      },
+      rangeStart: effectiveRangeStart,
+      rangeEnd,
+    });
   const uptime_pct = total_sec === 0 ? 0 : (uptime_sec / total_sec) * 100;
 
   return withVisibilityAwareCaching(

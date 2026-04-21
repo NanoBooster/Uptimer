@@ -142,7 +142,7 @@ describe('internal homepage refresh route', () => {
     );
 
     const res = await worker.fetch(
-      new Request('https://status.example.com/api/v1/internal/refresh/homepage', {
+      new Request('http://internal/api/v1/internal/refresh/homepage', {
         method: 'POST',
         headers: {
           Authorization: 'Bearer test-admin-token',
@@ -247,7 +247,7 @@ describe('internal homepage refresh route', () => {
     );
 
     const res = await worker.fetch(
-      new Request('https://status.example.com/api/v1/internal/refresh/homepage', {
+      new Request('http://internal/api/v1/internal/refresh/homepage', {
         method: 'POST',
         headers: {
           Authorization: 'Bearer test-admin-token',
@@ -281,7 +281,7 @@ describe('internal homepage refresh route', () => {
     } as never);
 
     const res = await worker.fetch(
-      new Request('https://status.example.com/api/v1/internal/refresh/homepage', {
+      new Request('http://internal/api/v1/internal/refresh/homepage', {
         method: 'POST',
         headers: {
           Authorization: 'Bearer test-admin-token',
@@ -336,7 +336,7 @@ describe('internal homepage refresh route', () => {
     vi.mocked(computePublicHomepagePayload).mockResolvedValue(computedPayload as never);
 
     const res = await worker.fetch(
-      new Request('https://status.example.com/api/v1/internal/refresh/homepage', {
+      new Request('http://internal/api/v1/internal/refresh/homepage', {
         method: 'POST',
         headers: {
           Authorization: 'Bearer test-admin-token',

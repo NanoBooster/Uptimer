@@ -51,8 +51,9 @@ function resolveTraceContext(request, env) {
   const tokenEnv = typeof env?.UPTIMER_TRACE_TOKEN === 'string' ? env.UPTIMER_TRACE_TOKEN.trim() : '';
   const fallbackEnvToken = typeof env?.TRACE_TOKEN === 'string' ? env.TRACE_TOKEN.trim() : '';
   const expectedToken = tokenEnv || fallbackEnvToken;
+  if (!expectedToken) return null;
   const providedToken = request.headers.get(TRACE_TOKEN_HEADER) || '';
-  if (expectedToken && providedToken !== expectedToken) return null;
+  if (providedToken !== expectedToken) return null;
 
   const id = request.headers.get(TRACE_ID_HEADER) || crypto.randomUUID();
   const modeRaw = request.headers.get(TRACE_MODE_HEADER) || '';
@@ -470,6 +471,14 @@ async function fetchPublicHomepageArtifact(env, trace) {
 
 async function proxyApiRequest(request, env, trace) {
   const url = new URL(request.url);
+  if (url.pathname === '/api/v1/internal' || url.pathname.startsWith('/api/v1/internal/')) {
+    if (trace) {
+      trace.setLabel('route', 'pages/api-proxy');
+      trace.setLabel('path', 'internal-blocked');
+    }
+    return finalizeTraceResponse(jsonError(404, 'NOT_FOUND', 'Not Found'), trace);
+  }
+
   const upstreamUrl = buildApiProxyUrl(url, env);
 
   if (!upstreamUrl) {

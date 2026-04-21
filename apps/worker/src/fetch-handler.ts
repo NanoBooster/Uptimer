@@ -79,7 +79,7 @@ function hasValidAdminToken(req: Request, env: Pick<Env, 'ADMIN_TOKEN'>): boolea
   return readBearerToken(req.headers.get('authorization')) === expected;
 }
 
-function applyPrivateNoStore(res: Response): Response {
+function appendAuthorizationVary(res: Response): Response {
   const vary = res.headers.get('Vary');
   if (!vary) {
     res.headers.set('Vary', 'Authorization');
@@ -87,6 +87,11 @@ function applyPrivateNoStore(res: Response): Response {
     res.headers.set('Vary', `${vary}, Authorization`);
   }
 
+  return res;
+}
+
+function applyPrivateNoStore(res: Response): Response {
+  appendAuthorizationVary(res);
   res.headers.set('Cache-Control', 'private, no-store');
   return res;
 }
@@ -294,10 +299,10 @@ async function handlePublicStatus(req: Request, env: Env, ctx: ExecutionContext)
       )
     : await readStatusSnapshotJson(env.DB, now);
   if (snapshot) {
-    const res = new Response(snapshot.bodyJson, {
+    const res = appendAuthorizationVary(new Response(snapshot.bodyJson, {
       status: 200,
       headers: { 'Content-Type': 'application/json; charset=utf-8' },
-    });
+    }));
     applyStatusCacheHeaders(res, snapshot.age);
     if (trace) {
       trace.setLabel('path', 'snapshot');
@@ -320,10 +325,10 @@ async function handlePublicStatus(req: Request, env: Env, ctx: ExecutionContext)
         )
       : await computePublicStatusPayload(env.DB, now);
 
-    const res = new Response(JSON.stringify(payload), {
+    const res = appendAuthorizationVary(new Response(JSON.stringify(payload), {
       status: 200,
       headers: { 'Content-Type': 'application/json; charset=utf-8' },
-    });
+    }));
     applyStatusCacheHeaders(res, 0);
 
     ctx.waitUntil(
@@ -348,10 +353,10 @@ async function handlePublicStatus(req: Request, env: Env, ctx: ExecutionContext)
         )
       : await readStaleStatusSnapshotJson(env.DB, now, 10 * 60);
     if (stale) {
-      const res = new Response(stale.bodyJson, {
+      const res = appendAuthorizationVary(new Response(stale.bodyJson, {
         status: 200,
         headers: { 'Content-Type': 'application/json; charset=utf-8' },
-      });
+      }));
       applyStatusCacheHeaders(res, Math.min(60, stale.age));
       if (trace) {
         trace.setLabel('path', 'stale');

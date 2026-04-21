@@ -33,6 +33,14 @@ function hasValidInternalAuth(request: Request, env: Env): boolean {
   return readBearerToken(request.headers.get('Authorization')) === env.ADMIN_TOKEN;
 }
 
+function isInternalServiceRequest(request: Request): boolean {
+  try {
+    return new URL(request.url).hostname === 'internal';
+  } catch {
+    return false;
+  }
+}
+
 function isRequestBodyTooLarge(request: Request): boolean {
   const raw = request.headers.get('Content-Length');
   if (!raw) {
@@ -194,6 +202,9 @@ function finalizeInternalRefreshResponse(
 async function handleInternalHomepageRefresh(request: Request, env: Env): Promise<Response> {
   if (request.method !== 'POST') {
     return new Response('Method Not Allowed', { status: 405 });
+  }
+  if (!isInternalServiceRequest(request)) {
+    return new Response('Not Found', { status: 404 });
   }
   if (!hasValidInternalAuth(request, env)) {
     return new Response('Forbidden', { status: 403 });
@@ -552,6 +563,9 @@ async function handleInternalScheduledCheckBatch(
   if (request.method !== 'POST') {
     return new Response('Method Not Allowed', { status: 405 });
   }
+  if (!isInternalServiceRequest(request)) {
+    return new Response('Not Found', { status: 404 });
+  }
   if (!hasValidInternalAuth(request, env)) {
     return new Response('Forbidden', { status: 403 });
   }
@@ -574,7 +588,7 @@ async function handleInternalScheduledCheckBatch(
 
   const ids = [...new Set(parsedBody.ids)];
   const suppressedMonitorIds = new Set(parsedBody.suppressed_monitor_ids ?? []);
-  const [{ listMonitorRowsByIds, runPersistedMonitorBatch }, notificationsModule] =
+  const [{ runExclusivePersistedMonitorBatch }, notificationsModule] =
     await Promise.all([
       import('./scheduler/scheduled'),
       parsedBody.allow_notifications === true
@@ -582,19 +596,12 @@ async function handleInternalScheduledCheckBatch(
         : Promise.resolve(null),
     ]);
 
-  const fetchedRows = await listMonitorRowsByIds(env.DB, ids);
-  const rowById = new Map(fetchedRows.map((row) => [row.id, row]));
-  const rows = ids
-    .map((id) => rowById.get(id) ?? null)
-    .filter((row): row is NonNullable<typeof row> => row !== null)
-    .filter((row) => row.last_checked_at === null || row.last_checked_at < parsedBody.checked_at);
-
   const notify = notificationsModule
     ? await notificationsModule.createNotifyContext(env, ctx)
     : null;
-  const result = await runPersistedMonitorBatch({
+  const result = await runExclusivePersistedMonitorBatch({
     db: env.DB,
-    rows,
+    ids,
     checkedAt: parsedBody.checked_at,
     suppressedMonitorIds,
     stateMachineConfig: {

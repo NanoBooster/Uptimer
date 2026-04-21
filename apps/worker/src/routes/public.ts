@@ -61,7 +61,7 @@ function isAuthorizedStatusAdminRequest(c: {
   return hasValidAdminTokenRequest(c);
 }
 
-function applyPrivateNoStore(res: Response): Response {
+function appendAuthorizationVary(res: Response): Response {
   const vary = res.headers.get('Vary');
   if (!vary) {
     res.headers.set('Vary', 'Authorization');
@@ -69,12 +69,17 @@ function applyPrivateNoStore(res: Response): Response {
     res.headers.set('Vary', `${vary}, Authorization`);
   }
 
+  return res;
+}
+
+function applyPrivateNoStore(res: Response): Response {
+  appendAuthorizationVary(res);
   res.headers.set('Cache-Control', 'private, no-store');
   return res;
 }
 
 function withVisibilityAwareCaching(res: Response, includeHiddenMonitors: boolean): Response {
-  return includeHiddenMonitors ? applyPrivateNoStore(res) : res;
+  return includeHiddenMonitors ? applyPrivateNoStore(res) : appendAuthorizationVary(res);
 }
 
 function shouldPreferRecentHomepageArtifact(opts: {
@@ -166,6 +171,8 @@ publicRoutes.use(
     // public snapshot freshness), so skipping the shared edge cache reduces
     // median CPU without changing the user-visible payload.
     skipPathnames: [
+      '/homepage',
+      '/homepage-artifact',
       '/api/v1/public/homepage',
       '/api/v1/public/homepage-artifact',
     ],
@@ -895,7 +902,7 @@ publicRoutes.get('/status', async (c) => {
   );
   if (snapshot) {
     c.header('Content-Type', 'application/json; charset=utf-8');
-    const res = c.body(snapshot.bodyJson);
+    const res = withVisibilityAwareCaching(c.body(snapshot.bodyJson), includeHiddenMonitors);
     applyStatusCacheHeaders(res, snapshot.age);
     trace.setLabel('path', 'snapshot');
     trace.setLabel('age', snapshot.age);
@@ -907,7 +914,7 @@ publicRoutes.get('/status', async (c) => {
     const payload = await trace.timeAsync('status_compute', () =>
       computePublicStatusPayload(c.env.DB, now),
     );
-    const res = c.json(payload);
+    const res = withVisibilityAwareCaching(c.json(payload), includeHiddenMonitors);
     applyStatusCacheHeaders(res, 0);
 
     c.executionCtx.waitUntil(
@@ -927,7 +934,10 @@ publicRoutes.get('/status', async (c) => {
     // instead of failing the entire status page.
     const stale = await readStaleStatusSnapshot(c.env.DB, now, 10 * 60);
     if (stale) {
-      const res = c.json(toSnapshotPayload(stale.data));
+      const res = withVisibilityAwareCaching(
+        c.json(toSnapshotPayload(stale.data)),
+        includeHiddenMonitors,
+      );
       applyStatusCacheHeaders(res, Math.min(60, stale.age));
       trace.setLabel('path', 'stale');
       trace.setLabel('age', stale.age);

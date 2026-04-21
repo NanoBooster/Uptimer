@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 import {
   publicHomepageResponseSchema,
   type PublicHomepageResponse,
@@ -63,6 +65,8 @@ const HOMEPAGE_FAST_PUBLIC_LOCALES = new Set<HomepagePublicSettings['site_locale
   'ja',
   'es',
 ]);
+const nonNegativeIntegerArraySchema = z.array(z.number().int().nonnegative());
+const nullableNonNegativeIntegerArraySchema = z.array(z.number().int().nonnegative().nullable());
 
 type HomepageMonitorRow = {
   id: number;
@@ -171,11 +175,15 @@ async function withTraceAsync<T>(
   return trace ? trace.timeAsync(name, fn) : await fn();
 }
 
-function safeParseJsonArray<T>(text: string | null): T[] {
+function safeParseJsonArray<T>(
+  text: string | null,
+  schema: z.ZodType<T[]>,
+): T[] {
   if (!text) return [];
   try {
     const parsed = JSON.parse(text) as unknown;
-    return Array.isArray(parsed) ? (parsed as T[]) : [];
+    const validated = schema.safeParse(parsed);
+    return validated.success ? validated.data : [];
   } catch {
     return [];
   }
@@ -1073,10 +1081,22 @@ async function buildHomepageMonitorCardsFromRows(
       const totals = totalsByMonitor[index];
       if (!monitor || !totals) continue;
 
-      monitor.uptime_day_strip.day_start_at = safeParseJsonArray<number>(row[1]);
-      monitor.uptime_day_strip.downtime_sec = safeParseJsonArray<number>(row[2]);
-      monitor.uptime_day_strip.unknown_sec = safeParseJsonArray<number>(row[3]);
-      monitor.uptime_day_strip.uptime_pct_milli = safeParseJsonArray<number | null>(row[4]);
+      monitor.uptime_day_strip.day_start_at = safeParseJsonArray(
+        row[1],
+        nonNegativeIntegerArraySchema,
+      );
+      monitor.uptime_day_strip.downtime_sec = safeParseJsonArray(
+        row[2],
+        nonNegativeIntegerArraySchema,
+      );
+      monitor.uptime_day_strip.unknown_sec = safeParseJsonArray(
+        row[3],
+        nonNegativeIntegerArraySchema,
+      );
+      monitor.uptime_day_strip.uptime_pct_milli = safeParseJsonArray(
+        row[4],
+        nullableNonNegativeIntegerArraySchema,
+      );
       totals.totalSec = row[5] ?? 0;
       totals.uptimeSec = row[6] ?? 0;
     }

@@ -38,7 +38,7 @@ function isAuthorizedStatusAdminRequest(c: {
   return hasValidAdminTokenRequest(c);
 }
 
-function applyPrivateNoStore(res: Response): Response {
+function appendAuthorizationVary(res: Response): Response {
   const vary = res.headers.get('Vary');
   if (!vary) {
     res.headers.set('Vary', 'Authorization');
@@ -46,12 +46,17 @@ function applyPrivateNoStore(res: Response): Response {
     res.headers.set('Vary', `${vary}, Authorization`);
   }
 
+  return res;
+}
+
+function applyPrivateNoStore(res: Response): Response {
+  appendAuthorizationVary(res);
   res.headers.set('Cache-Control', 'private, no-store');
   return res;
 }
 
 function withVisibilityAwareCaching(res: Response, includeHiddenMonitors: boolean): Response {
-  return includeHiddenMonitors ? applyPrivateNoStore(res) : res;
+  return includeHiddenMonitors ? applyPrivateNoStore(res) : appendAuthorizationVary(res);
 }
 
 function createTrace(c: {

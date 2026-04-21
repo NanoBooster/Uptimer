@@ -38,11 +38,13 @@ export function resolveTraceOptions(opts: {
   }
 
   const token = readTraceToken(opts.env);
-  if (token) {
-    const provided = opts.header(TRACE_TOKEN_HEADER) ?? '';
-    if (provided !== token) {
-      return { enabled: false, id: '', mode };
-    }
+  if (!token) {
+    return { enabled: false, id: '', mode };
+  }
+
+  const provided = opts.header(TRACE_TOKEN_HEADER) ?? '';
+  if (provided !== token) {
+    return { enabled: false, id: '', mode };
   }
 
   const idFromHeader = opts.header(TRACE_ID_HEADER);

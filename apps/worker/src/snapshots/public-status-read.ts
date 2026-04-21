@@ -87,13 +87,18 @@ function readCachedStatusSnapshot(
   db: D1Database,
   generatedAt: number,
   updatedAt: number,
+  bodyJson: string,
 ): StatusSnapshotCacheEntry | null {
   const cached = normalizedStatusCacheByDb.get(db);
   if (!cached) {
     return null;
   }
 
-  return cached.generatedAt === generatedAt && cached.updatedAt === updatedAt ? cached : null;
+  return cached.generatedAt === generatedAt &&
+    cached.updatedAt === updatedAt &&
+    cached.bodyJson === bodyJson
+    ? cached
+    : null;
 }
 
 function writeCachedStatusSnapshot(
@@ -131,7 +136,7 @@ function readValidatedStatusSnapshotRow(
   row: StatusSnapshotRow,
 ): StatusSnapshotCacheEntry | null {
   const updatedAt = toSnapshotUpdatedAt(row);
-  const cached = readCachedStatusSnapshot(db, row.generated_at, updatedAt);
+  const cached = readCachedStatusSnapshot(db, row.generated_at, updatedAt, row.body_json);
   if (cached) {
     return cached;
   }

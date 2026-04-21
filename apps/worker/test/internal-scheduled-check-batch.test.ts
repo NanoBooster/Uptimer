@@ -1,16 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/scheduler/scheduled', () => ({
-  listMonitorRowsByIds: vi.fn(),
-  runPersistedMonitorBatch: vi.fn(),
+  runExclusivePersistedMonitorBatch: vi.fn(),
 }));
 
 import type { Env } from '../src/env';
 import worker from '../src/index';
-import {
-  listMonitorRowsByIds,
-  runPersistedMonitorBatch,
-} from '../src/scheduler/scheduled';
+import { runExclusivePersistedMonitorBatch } from '../src/scheduler/scheduled';
 import { createFakeD1Database } from './helpers/fake-d1';
 
 describe('internal scheduled check-batch route', () => {
@@ -29,7 +25,7 @@ describe('internal scheduled check-batch route', () => {
 
     const makeRequest = (checkedAt: number) =>
       worker.fetch(
-        new Request('https://status.example.com/api/v1/internal/scheduled/check-batch', {
+        new Request('http://internal/api/v1/internal/scheduled/check-batch', {
           method: 'POST',
           headers: {
             Authorization: 'Bearer test-admin-token',
@@ -55,32 +51,7 @@ describe('internal scheduled check-batch route', () => {
     const now = new Date('2026-04-15T05:18:20.000Z').valueOf();
     vi.spyOn(Date, 'now').mockReturnValue(now);
 
-    vi.mocked(listMonitorRowsByIds).mockResolvedValue([
-      {
-        id: 1,
-        name: 'API',
-        type: 'http',
-        target: 'https://example.com',
-        interval_sec: 60,
-        created_at: 1_776_230_000,
-        timeout_ms: 10_000,
-        http_method: 'GET',
-        http_headers_json: null,
-        http_body: null,
-        expected_status_json: null,
-        response_keyword: null,
-        response_keyword_mode: null,
-        response_forbidden_keyword: null,
-        response_forbidden_keyword_mode: null,
-        state_status: 'up',
-        state_last_error: null,
-        last_checked_at: 1_776_230_220,
-        last_changed_at: 1_776_230_000,
-        consecutive_failures: 0,
-        consecutive_successes: 1,
-      },
-    ] as never);
-    vi.mocked(runPersistedMonitorBatch).mockResolvedValue({
+    vi.mocked(runExclusivePersistedMonitorBatch).mockResolvedValue({
       runtimeUpdates: [
         {
           monitor_id: 1,
@@ -112,7 +83,7 @@ describe('internal scheduled check-batch route', () => {
     } as unknown as Env;
 
     const res = await worker.fetch(
-      new Request('https://status.example.com/api/v1/internal/scheduled/check-batch', {
+      new Request('http://internal/api/v1/internal/scheduled/check-batch', {
         method: 'POST',
         headers: {
           Authorization: 'Bearer test-admin-token',

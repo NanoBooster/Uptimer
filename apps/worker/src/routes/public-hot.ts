@@ -35,6 +35,12 @@ function applyCorsHeaders(res: Response, origin: string | null): Response {
 }
 
 function applyPrivateNoStore(res: Response): Response {
+  appendAuthorizationVary(res);
+  res.headers.set('Cache-Control', 'private, no-store');
+  return res;
+}
+
+function appendAuthorizationVary(res: Response): Response {
   const vary = res.headers.get('Vary');
   if (!vary) {
     res.headers.set('Vary', 'Authorization');
@@ -42,7 +48,6 @@ function applyPrivateNoStore(res: Response): Response {
     res.headers.set('Vary', `${vary}, Authorization`);
   }
 
-  res.headers.set('Cache-Control', 'private, no-store');
   return res;
 }
 
@@ -169,7 +174,7 @@ publicHotRoutes.get('/status', async (c) => {
   );
   if (snapshot) {
     c.header('Content-Type', 'application/json; charset=utf-8');
-    const res = c.body(snapshot.bodyJson);
+    const res = appendAuthorizationVary(c.body(snapshot.bodyJson));
     applyStatusCacheHeaders(res, snapshot.age);
     trace.setLabel('path', 'snapshot');
     trace.setLabel('age', snapshot.age);
@@ -187,7 +192,7 @@ publicHotRoutes.get('/status', async (c) => {
     const payload = await trace.timeAsync('status_compute', () =>
       computePublicStatusPayload(c.env.DB, now),
     );
-    const res = c.json(payload);
+    const res = appendAuthorizationVary(c.json(payload));
     applyStatusCacheHeaders(res, 0);
 
     c.executionCtx.waitUntil(
@@ -209,7 +214,7 @@ publicHotRoutes.get('/status', async (c) => {
     );
     if (stale) {
       c.header('Content-Type', 'application/json; charset=utf-8');
-      const res = c.body(stale.bodyJson);
+      const res = appendAuthorizationVary(c.body(stale.bodyJson));
       applyStatusCacheHeaders(res, Math.min(60, stale.age));
       trace.setLabel('path', 'stale');
       trace.setLabel('age', stale.age);

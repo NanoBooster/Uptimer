@@ -69,13 +69,6 @@ function isSameMinute(a: number, b: number): boolean {
   return Math.floor(a / 60) === Math.floor(b / 60);
 }
 
-function canTrustCurrentMinuteScheduledRuntimeUpdates(
-  now: number,
-  updates: readonly MonitorRuntimeUpdate[],
-): boolean {
-  return updates.length > 0 && updates.every((update) => isSameMinute(update.checked_at, now));
-}
-
 function normalizeRuntimeUpdateStatus(
   value: MonitorRuntimeUpdate['check_status'] | MonitorRuntimeUpdate['next_status'],
 ): 'up' | 'down' | 'maintenance' | 'paused' | 'unknown' {
@@ -478,28 +471,19 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
     trace.setLabel('now', now);
     trace.setLabel('runtime_updates_count', runtimeUpdates?.length ?? 0);
   }
-  const trustCurrentMinuteRuntimeUpdates =
-    scheduledRefreshRequest && runtimeUpdates
-      ? canTrustCurrentMinuteScheduledRuntimeUpdates(now, runtimeUpdates)
-      : false;
   const fastPathRuntimeUpdates =
     scheduledRefreshRequest && runtimeUpdates
-      ? trustCurrentMinuteRuntimeUpdates
-        ? runtimeUpdates
-        : await sanitizeScheduledRuntimeUpdatesForFastPath({
-            db: env.DB,
-            now,
-            updates: runtimeUpdates,
-            trace,
-          })
+      ? await sanitizeScheduledRuntimeUpdatesForFastPath({
+          db: env.DB,
+          now,
+          updates: runtimeUpdates,
+          trace,
+        })
       : (runtimeUpdates ?? []);
   if (trace?.enabled) {
-    if (trustCurrentMinuteRuntimeUpdates) {
-      trace.setLabel('runtime_updates_baseline', 'current_minute');
-    }
     trace.setLabel('runtime_updates_fast_path_count', fastPathRuntimeUpdates.length);
   }
-  const skipInitialFreshnessCheck = scheduledRefreshRequest;
+  const skipInitialFreshnessCheck = scheduledRefreshRequest && fastPathRuntimeUpdates.length > 0;
   if (trace?.enabled && skipInitialFreshnessCheck) {
     trace.setLabel('skip_initial_freshness_check', '1');
   }

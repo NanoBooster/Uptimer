@@ -9,6 +9,7 @@ export interface Env {
   // callers present `X-Uptimer-Trace-Token`.
   UPTIMER_TRACE_TOKEN?: string;
   TRACE_TOKEN?: string;
+  UPTIMER_HOMEPAGE_RESIDUAL_TRACE?: string;
 
   // In-memory, per-instance rate limit for admin endpoints.
   // Keep optional so older deployments don't break.

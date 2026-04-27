@@ -472,38 +472,26 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
   const scheduledRefreshRequest = isScheduledRefreshRequest(request);
   const contentType = request.headers.get('Content-Type') ?? '';
 
+  const traceResidualDetails =
+    trace?.enabled === true && normalizeTruthyHeader(env.UPTIMER_HOMEPAGE_RESIDUAL_TRACE ?? null);
+  const detailTrace: Trace | undefined = traceResidualDetails && trace ? trace : undefined;
+
   if (trace?.enabled) {
     trace.setLabel('route', 'internal/homepage-refresh');
-    trace.setLabel('request_content_length', request.headers.get('Content-Length') ?? 'unknown');
-    trace.setLabel('internal_format', wantsCompactInternalFormat(request) ? 'compact-v1' : 'default');
+    if (traceResidualDetails) {
+      trace.setLabel('request_content_length', request.headers.get('Content-Length') ?? 'unknown');
+      trace.setLabel('internal_format', wantsCompactInternalFormat(request) ? 'compact-v1' : 'default');
+    }
   }
 
   if (contentType.includes('application/json')) {
-    const rawBody = trace
-      ? await trace.timeAsync('homepage_refresh_body_json_read', async () =>
+    const rawBody = detailTrace
+      ? await detailTrace.timeAsync('homepage_refresh_body_json_read', async () =>
           await request.json().catch(() => null),
         )
       : await request.json().catch(() => null);
-    const parsedBody = trace
-      ? trace.time('homepage_refresh_body_parse_validate', () =>
-          scheduledRefreshRequest
-            ? parseInternalRefreshRuntimeUpdates(rawBody)
-            : (() => {
-                const parsed = internalRefreshJsonBodySchema.safeParse(rawBody);
-                if (!parsed.success) {
-                  return null;
-                }
-
-                const runtime_updates = parsed.data.runtime_updates;
-                if (runtime_updates === undefined) {
-                  return {};
-                }
-
-                const parsedRuntimeUpdates = parseMonitorRuntimeUpdates(runtime_updates);
-                return parsedRuntimeUpdates ? { runtime_updates: parsedRuntimeUpdates } : null;
-              })(),
-        )
-      : scheduledRefreshRequest
+    const parseBody = () =>
+      scheduledRefreshRequest
         ? parseInternalRefreshRuntimeUpdates(rawBody)
         : (() => {
             const parsed = internalRefreshJsonBodySchema.safeParse(rawBody);
@@ -519,6 +507,9 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
             const parsedRuntimeUpdates = parseMonitorRuntimeUpdates(runtime_updates);
             return parsedRuntimeUpdates ? { runtime_updates: parsedRuntimeUpdates } : null;
           })();
+    const parsedBody = detailTrace
+      ? detailTrace.time('homepage_refresh_body_parse_validate', parseBody)
+      : parseBody();
     if (!parsedBody) {
       return new Response('Forbidden', { status: 403 });
     }
@@ -533,8 +524,8 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
   }
   const fastPathRuntimeUpdates =
     scheduledRefreshRequest && runtimeUpdates
-      ? trace
-        ? await trace.timeAsync(
+      ? detailTrace
+        ? await detailTrace.timeAsync(
             'homepage_refresh_sanitize_runtime_updates',
             async () =>
               await sanitizeScheduledRuntimeUpdatesForFastPath({
@@ -845,69 +836,41 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
 
     homepageRefreshLease.assertHeld('writing homepage snapshot');
     const activeHomepageRefreshLease = homepageRefreshLease;
-    const { preparedHomepageWrite, preparedStatusWrite } = trace
-      ? trace.time('snapshot_prepare_writes', () => {
-          const preparedHomepageWrite = snapshotMod.prepareHomepageSnapshotWrite(
-            env.DB,
+    const prepareSnapshotWrites = (writeTrace?: Trace) => {
+      const preparedHomepageWrite = snapshotMod.prepareHomepageSnapshotWrite(
+        env.DB,
+        now,
+        payload,
+        writeTrace,
+        baseSnapshot.seedDataSnapshot,
+        {
+          name: HOMEPAGE_REFRESH_LOCK_NAME,
+          expiresAt: activeHomepageRefreshLease.getExpiresAt(),
+        },
+      );
+      const preparedStatusWrite = refreshedStatusPayload
+        ? statusSnapshotMod.prepareStatusSnapshotWrite({
+            db: env.DB,
             now,
-            payload,
-            trace ?? undefined,
-            baseSnapshot.seedDataSnapshot,
-            {
-              name: HOMEPAGE_REFRESH_LOCK_NAME,
-              expiresAt: activeHomepageRefreshLease.getExpiresAt(),
+            payload: refreshedStatusPayload,
+            ...(writeTrace ? { trace: writeTrace } : {}),
+            afterHomepage: {
+              key: snapshotMod.getHomepageSnapshotArtifactKey(),
+              generatedAt: preparedHomepageWrite.generatedAt,
+              updatedAt: now,
+              lease: {
+                name: HOMEPAGE_REFRESH_LOCK_NAME,
+                expiresAt: activeHomepageRefreshLease.getExpiresAt(),
+              },
             },
-          );
-          const preparedStatusWrite = refreshedStatusPayload
-            ? statusSnapshotMod.prepareStatusSnapshotWrite({
-                db: env.DB,
-                now,
-                payload: refreshedStatusPayload,
-                ...(trace ? { trace } : {}),
-                afterHomepage: {
-                  key: snapshotMod.getHomepageSnapshotArtifactKey(),
-                  generatedAt: preparedHomepageWrite.generatedAt,
-                  updatedAt: now,
-                  lease: {
-                    name: HOMEPAGE_REFRESH_LOCK_NAME,
-                    expiresAt: activeHomepageRefreshLease.getExpiresAt(),
-                  },
-                },
-              })
-            : null;
-          return { preparedHomepageWrite, preparedStatusWrite };
-        })
-      : (() => {
-          const preparedHomepageWrite = snapshotMod.prepareHomepageSnapshotWrite(
-            env.DB,
-            now,
-            payload,
-            undefined,
-            baseSnapshot.seedDataSnapshot,
-            {
-              name: HOMEPAGE_REFRESH_LOCK_NAME,
-              expiresAt: activeHomepageRefreshLease.getExpiresAt(),
-            },
-          );
-          const preparedStatusWrite = refreshedStatusPayload
-            ? statusSnapshotMod.prepareStatusSnapshotWrite({
-                db: env.DB,
-                now,
-                payload: refreshedStatusPayload,
-                afterHomepage: {
-                  key: snapshotMod.getHomepageSnapshotArtifactKey(),
-                  generatedAt: preparedHomepageWrite.generatedAt,
-                  updatedAt: now,
-                  lease: {
-                    name: HOMEPAGE_REFRESH_LOCK_NAME,
-                    expiresAt: activeHomepageRefreshLease.getExpiresAt(),
-                  },
-                },
-              })
-            : null;
-          return { preparedHomepageWrite, preparedStatusWrite };
-        })();
-    if (trace?.enabled) {
+          })
+        : null;
+      return { preparedHomepageWrite, preparedStatusWrite };
+    };
+    const { preparedHomepageWrite, preparedStatusWrite } = detailTrace
+      ? detailTrace.time('snapshot_prepare_writes', () => prepareSnapshotWrites(detailTrace))
+      : prepareSnapshotWrites();
+    if (trace?.enabled && traceResidualDetails) {
       trace.setLabel('snapshot_write_count', preparedStatusWrite ? 2 : 1);
     }
     const writeResults = trace
@@ -922,33 +885,22 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
         ? await env.DB.batch([preparedHomepageWrite.statement, preparedStatusWrite.statement])
         : [await preparedHomepageWrite.statement.run()];
     homepageRefreshLease.assertHeld('finalizing snapshot writes');
-    const writeInspection = trace
-      ? trace.time('snapshot_write_result_inspect', () => {
-          const homepageWriteResult = writeResults[0];
-          if (!homepageWriteResult) {
-            throw new Error('homepage snapshot write returned no result');
-          }
-          const homepageSnapshotWritten =
-            snapshotMod.didApplyHomepageSnapshotWrite(homepageWriteResult);
-          const statusWriteResult = writeResults[1];
-          const statusSnapshotWritten = refreshedStatusPayload
-            ? statusSnapshotMod.didApplyStatusSnapshotWrite(statusWriteResult)
-            : false;
-          return { homepageSnapshotWritten, statusSnapshotWritten };
-        })
-      : (() => {
-          const homepageWriteResult = writeResults[0];
-          if (!homepageWriteResult) {
-            throw new Error('homepage snapshot write returned no result');
-          }
-          const homepageSnapshotWritten =
-            snapshotMod.didApplyHomepageSnapshotWrite(homepageWriteResult);
-          const statusWriteResult = writeResults[1];
-          const statusSnapshotWritten = refreshedStatusPayload
-            ? statusSnapshotMod.didApplyStatusSnapshotWrite(statusWriteResult)
-            : false;
-          return { homepageSnapshotWritten, statusSnapshotWritten };
-        })();
+    const inspectSnapshotWriteResults = () => {
+      const homepageWriteResult = writeResults[0];
+      if (!homepageWriteResult) {
+        throw new Error('homepage snapshot write returned no result');
+      }
+      const homepageSnapshotWritten =
+        snapshotMod.didApplyHomepageSnapshotWrite(homepageWriteResult);
+      const statusWriteResult = writeResults[1];
+      const statusSnapshotWritten = refreshedStatusPayload
+        ? statusSnapshotMod.didApplyStatusSnapshotWrite(statusWriteResult)
+        : false;
+      return { homepageSnapshotWritten, statusSnapshotWritten };
+    };
+    const writeInspection = detailTrace
+      ? detailTrace.time('snapshot_write_result_inspect', inspectSnapshotWriteResults)
+      : inspectSnapshotWriteResults();
     if (!writeInspection.homepageSnapshotWritten) {
       if (trace?.enabled) {
         trace.setLabel('skip', 'homepage_write_noop');

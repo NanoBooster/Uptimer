@@ -724,6 +724,33 @@ export async function runInternalHomepageRefreshCore({
       trace?.setLabel('status_refresh', 'skipped');
     }
 
+    if (normalizeInternalTruthy(env.UPTIMER_PUBLIC_MONITOR_FRAGMENT_WRITES)) {
+      const { refreshPublicMonitorFragmentsFromPayloads } = await import(
+        './monitor-fragments-refresh-core'
+      );
+      const fragmentRefresh = trace
+        ? await trace.timeAsync(
+            'monitor_fragment_refresh',
+            async () =>
+              await refreshPublicMonitorFragmentsFromPayloads({
+                db: env.DB,
+                now,
+                homepagePayload: payload,
+                statusPayload: refreshedStatusPayload,
+                runtimeUpdates: fastPathRuntimeUpdates,
+                trace,
+              }),
+          )
+        : await refreshPublicMonitorFragmentsFromPayloads({
+            db: env.DB,
+            now,
+            homepagePayload: payload,
+            statusPayload: refreshedStatusPayload,
+            runtimeUpdates: fastPathRuntimeUpdates,
+          });
+      trace?.setLabel('monitor_fragment_refresh_ok', fragmentRefresh.ok ? 1 : 0);
+    }
+
     return toInternalHomepageRefreshCoreResult(true, true, { baseSnapshotSource });
   } catch (err) {
     if (err instanceof LeaseLostError) {

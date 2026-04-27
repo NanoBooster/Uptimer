@@ -460,6 +460,24 @@ async function handleInternalScheduledCheckBatch(
     }), trace, traceMod, { ok: false, error: true });
   }
 
+  if (normalizeTruthyHeader(env.UPTIMER_PUBLIC_MONITOR_UPDATE_FRAGMENT_WRITES ?? null)) {
+    const { buildMonitorRuntimeUpdateFragmentWrites } = await import(
+      './snapshots/public-monitor-fragments'
+    );
+    const { writePublicSnapshotFragments } = await import('./snapshots/public-fragments');
+    const fragmentWrites = buildMonitorRuntimeUpdateFragmentWrites(result.runtimeUpdates, now);
+    if (trace?.enabled) {
+      trace.setLabel('monitor_update_fragment_write_count', fragmentWrites.length);
+    }
+    if (fragmentWrites.length > 0) {
+      ctx.waitUntil(
+        writePublicSnapshotFragments(env.DB, fragmentWrites).catch((err) => {
+          console.warn('internal scheduled check batch: monitor update fragment write failed', err);
+        }),
+      );
+    }
+  }
+
   const responsePayload = {
     ok: true,
     runtime_updates: wantsCompactInternalFormat(request)

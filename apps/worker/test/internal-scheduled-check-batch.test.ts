@@ -163,6 +163,85 @@ describe('internal scheduled check-batch route', () => {
     });
   });
 
+  it('queues compact runtime update fragment writes when enabled', async () => {
+    const now = new Date('2026-04-15T05:18:20.000Z').valueOf();
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+    vi.mocked(runExclusivePersistedMonitorBatch).mockResolvedValue({
+      runtimeUpdates: [
+        {
+          monitor_id: 1,
+          interval_sec: 60,
+          created_at: 1_776_230_000,
+          checked_at: 1_776_230_280,
+          check_status: 'up',
+          next_status: 'up',
+          latency_ms: 21,
+        },
+      ],
+      stats: {
+        processedCount: 1,
+        rejectedCount: 0,
+        attemptTotal: 1,
+        httpCount: 1,
+        tcpCount: 0,
+        assertionCount: 0,
+        downCount: 0,
+        unknownCount: 0,
+      },
+      checksDurMs: 4,
+      persistDurMs: 2,
+    });
+    const writes: unknown[][] = [];
+    const waitUntilPromises: Promise<unknown>[] = [];
+    const env = {
+      DB: createFakeD1Database([
+        {
+          match: 'insert into public_snapshot_fragments',
+          run: (args) => {
+            writes.push(args);
+            return { meta: { changes: 1 } };
+          },
+        },
+      ]),
+      ADMIN_TOKEN: 'test-admin-token',
+      UPTIMER_PUBLIC_MONITOR_UPDATE_FRAGMENT_WRITES: '1',
+    } as unknown as Env;
+
+    const res = await worker.fetch(
+      new Request('http://internal/api/v1/internal/scheduled/check-batch', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-admin-token',
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify({
+          token: 'test-admin-token',
+          ids: [1],
+          checked_at: 1_776_230_280,
+          state_failures_to_down_from_up: 2,
+          state_successes_to_up_from_down: 2,
+        }),
+      }),
+      env,
+      {
+        waitUntil: (promise: Promise<unknown>) => waitUntilPromises.push(promise),
+      } as unknown as ExecutionContext,
+    );
+
+    expect(res.status).toBe(200);
+    expect(waitUntilPromises).toHaveLength(1);
+    await Promise.all(waitUntilPromises);
+    expect(writes).toEqual([
+      [
+        'monitor-runtime:updates',
+        'monitor:1',
+        1_776_230_280,
+        '[1,60,1776230000,1776230280,"up","up",21]',
+        1_776_230_300,
+      ],
+    ]);
+  });
+
   it('emits trace headers and logs for scheduled check batches with a valid trace token', async () => {
     const now = new Date('2026-04-15T05:18:20.000Z').valueOf();
     vi.spyOn(Date, 'now').mockReturnValue(now);

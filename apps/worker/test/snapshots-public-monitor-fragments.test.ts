@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildHomepageMonitorFragmentWrites,
+  buildMonitorRuntimeUpdateFragmentWrites,
   buildStatusMonitorFragmentWrites,
   HOMEPAGE_MONITOR_FRAGMENTS_KEY,
+  MONITOR_RUNTIME_UPDATE_FRAGMENTS_KEY,
   STATUS_MONITOR_FRAGMENTS_KEY,
   toPublicMonitorFragmentKey,
 } from '../src/snapshots/public-monitor-fragments';
@@ -181,6 +183,42 @@ describe('snapshots/public-monitor-fragments', () => {
     expect(writes[0]!.bodyJson).toContain('heartbeat_strip');
     expect(writes[0]!.bodyJson).toContain('uptime_day_strip');
     expect(writes[0]!.bodyJson).not.toContain('bootstrap_mode');
+  });
+
+  it('serializes compact monitor runtime update fragments with latest update wins', () => {
+    const writes = buildMonitorRuntimeUpdateFragmentWrites(
+      [
+        {
+          monitor_id: 1,
+          interval_sec: 60,
+          created_at: 1_699_999_000,
+          checked_at: 1_700_000_000,
+          check_status: 'down',
+          next_status: 'down',
+          latency_ms: null,
+        },
+        {
+          monitor_id: 1,
+          interval_sec: 60,
+          created_at: 1_699_999_000,
+          checked_at: 1_700_000_060,
+          check_status: 'up',
+          next_status: 'up',
+          latency_ms: 42,
+        },
+      ],
+      1_700_000_065,
+    );
+
+    expect(writes).toEqual([
+      {
+        snapshotKey: MONITOR_RUNTIME_UPDATE_FRAGMENTS_KEY,
+        fragmentKey: 'monitor:1',
+        generatedAt: 1_700_000_060,
+        bodyJson: '[1,60,1699999000,1700000060,"up","up",42]',
+        updatedAt: 1_700_000_065,
+      },
+    ]);
   });
 
   it('validates monitor fragment keys', () => {

@@ -1,9 +1,11 @@
+import type { MonitorRuntimeUpdate } from '../public/monitor-runtime';
 import type { PublicHomepageResponse } from '../schemas/public-homepage';
 import type { PublicStatusResponse } from '../schemas/public-status';
 import type { PublicSnapshotFragmentWrite } from './public-fragments';
 
 export const STATUS_MONITOR_FRAGMENTS_KEY = 'status:monitors';
 export const HOMEPAGE_MONITOR_FRAGMENTS_KEY = 'homepage:monitors';
+export const MONITOR_RUNTIME_UPDATE_FRAGMENTS_KEY = 'monitor-runtime:updates';
 
 const MONITOR_FRAGMENT_PREFIX = 'monitor:';
 
@@ -104,4 +106,40 @@ export function buildHomepageMonitorFragmentWrites(
   }
 
   return writes;
+}
+
+function toCompactRuntimeUpdate(update: MonitorRuntimeUpdate): unknown[] {
+  return [
+    update.monitor_id,
+    update.interval_sec,
+    update.created_at,
+    update.checked_at,
+    update.check_status,
+    update.next_status,
+    update.latency_ms,
+  ];
+}
+
+export function buildMonitorRuntimeUpdateFragmentWrites(
+  updates: readonly MonitorRuntimeUpdate[],
+  updatedAt: number,
+): PublicSnapshotFragmentWrite[] {
+  const latestUpdateByMonitorId = new Map<number, MonitorRuntimeUpdate>();
+  for (const update of updates) {
+    assertMonitorId(update.monitor_id);
+    const previous = latestUpdateByMonitorId.get(update.monitor_id);
+    if (!previous || update.checked_at >= previous.checked_at) {
+      latestUpdateByMonitorId.set(update.monitor_id, update);
+    }
+  }
+
+  return [...latestUpdateByMonitorId.values()].map((update) =>
+    buildMonitorFragmentWrite({
+      snapshotKey: MONITOR_RUNTIME_UPDATE_FRAGMENTS_KEY,
+      fragmentKey: toPublicMonitorFragmentKey(update.monitor_id),
+      generatedAt: update.checked_at,
+      bodyJson: JSON.stringify(toCompactRuntimeUpdate(update)),
+      updatedAt,
+    }),
+  );
 }

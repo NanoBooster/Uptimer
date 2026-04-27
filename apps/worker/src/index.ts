@@ -59,6 +59,10 @@ function wantsCompactInternalFormat(request: Request): boolean {
   return request.headers.get('X-Uptimer-Internal-Format') === INTERNAL_PROTOCOL_FORMAT;
 }
 
+function wantsRuntimeUpdateFragmentsOnly(request: Request): boolean {
+  return normalizeTruthyHeader(request.headers.get('X-Uptimer-Runtime-Fragments-Only'));
+}
+
 function buildInternalRefreshResponse(ok: boolean, refreshed: boolean): Response {
   return new Response(JSON.stringify({ ok, refreshed }), {
     status: ok ? 200 : 500,
@@ -507,7 +511,12 @@ async function handleInternalScheduledCheckBatch(
     }), trace, traceMod, { ok: false, error: true });
   }
 
-  if (normalizeTruthyHeader(env.UPTIMER_PUBLIC_MONITOR_UPDATE_FRAGMENT_WRITES ?? null)) {
+  const monitorUpdateFragmentWritesEnabled = normalizeTruthyHeader(
+    env.UPTIMER_PUBLIC_MONITOR_UPDATE_FRAGMENT_WRITES ?? null,
+  );
+  const runtimeFragmentsOnly =
+    monitorUpdateFragmentWritesEnabled && wantsRuntimeUpdateFragmentsOnly(request);
+  if (monitorUpdateFragmentWritesEnabled) {
     const { buildMonitorRuntimeUpdateFragmentWrites } = await import(
       './snapshots/public-monitor-fragments'
     );
@@ -515,21 +524,28 @@ async function handleInternalScheduledCheckBatch(
     const fragmentWrites = buildMonitorRuntimeUpdateFragmentWrites(result.runtimeUpdates, now);
     if (trace?.enabled) {
       trace.setLabel('monitor_update_fragment_write_count', fragmentWrites.length);
+      trace.setLabel('runtime_updates_fragmented', runtimeFragmentsOnly ? 1 : 0);
     }
     if (fragmentWrites.length > 0) {
-      ctx.waitUntil(
+      const writeFragments = () =>
         writePublicSnapshotFragments(env.DB, fragmentWrites).catch((err) => {
           console.warn('internal scheduled check batch: monitor update fragment write failed', err);
-        }),
-      );
+        });
+      if (runtimeFragmentsOnly) {
+        await writeFragments();
+      } else {
+        ctx.waitUntil(writeFragments());
+      }
     }
   }
 
+  const responseRuntimeUpdates = runtimeFragmentsOnly ? [] : result.runtimeUpdates;
   const responsePayload = {
     ok: true,
     runtime_updates: wantsCompactInternalFormat(request)
-      ? encodeMonitorRuntimeUpdatesCompact(result.runtimeUpdates)
-      : result.runtimeUpdates,
+      ? encodeMonitorRuntimeUpdatesCompact(responseRuntimeUpdates)
+      : responseRuntimeUpdates,
+    ...(runtimeFragmentsOnly ? { runtime_updates_fragmented: true } : {}),
     processed_count: result.stats.processedCount,
     rejected_count: result.stats.rejectedCount,
     attempt_total: result.stats.attemptTotal,

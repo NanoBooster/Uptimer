@@ -117,6 +117,7 @@ type ScheduledCheckBatchServiceContext = {
     successesToUpFromDown: number;
   };
   allowNotifications: boolean;
+  runtimeFragmentsOnly?: boolean;
 };
 
 function readScheduledTraceToken(env: Env): string | null {
@@ -158,6 +159,15 @@ function shouldRefreshHomepageDirect(env: Env): boolean {
 function shouldRefreshRuntimeFragmentsViaService(env: Env): boolean {
   const rawEnv = env as unknown as Record<string, unknown>;
   return isTruthyEnvFlag(rawEnv.UPTIMER_SCHEDULED_RUNTIME_FRAGMENT_REFRESH);
+}
+
+function shouldUseScheduledRuntimeFragmentPipeline(env: Env): boolean {
+  const rawEnv = env as unknown as Record<string, unknown>;
+  return (
+    Boolean(env.SELF) &&
+    shouldRefreshRuntimeFragmentsViaService(env) &&
+    isTruthyEnvFlag(rawEnv.UPTIMER_PUBLIC_MONITOR_UPDATE_FRAGMENT_WRITES)
+  );
 }
 
 function readBoundedPositiveIntegerEnv(
@@ -395,6 +405,7 @@ async function runScheduledCheckBatchViaService(
     Authorization: `Bearer ${env.ADMIN_TOKEN}`,
     'X-Uptimer-Internal-Format': INTERNAL_PROTOCOL_FORMAT,
     'Content-Type': 'application/json; charset=utf-8',
+    ...(context.runtimeFragmentsOnly ? { 'X-Uptimer-Runtime-Fragments-Only': '1' } : {}),
   };
   if (traceScheduledRefresh) {
     headers['X-Uptimer-Trace'] = '1';
@@ -1449,13 +1460,7 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
   });
 
   try {
-    if (env.SELF && shouldRefreshRuntimeFragmentsViaService(env)) {
-      ctx.waitUntil(
-        refreshRuntimeFragmentsViaService(env).catch((err) => {
-          console.warn('runtime fragments refresh: service refresh failed', err);
-        }),
-      );
-    }
+    const useRuntimeFragmentPipeline = shouldUseScheduledRuntimeFragmentPipeline(env);
 
     const [settings, due, hasWebhookNotifications] = await Promise.all([
       readSettings(env.DB),
@@ -1510,6 +1515,7 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
       env.SELF && due.length > internalScheduledBatchSize
         ? chunkDueMonitorRows(due, internalScheduledBatchSize)
         : null;
+    const activeRuntimeFragmentPipeline = useRuntimeFragmentPipeline && serviceBatchRows !== null;
 
     const inlineNotificationHandler =
       notificationsModule && notify
@@ -1553,6 +1559,7 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
                 suppressedMonitorIds: suppressedIds,
                 stateMachineConfig,
                 allowNotifications: Boolean(notify),
+                ...(activeRuntimeFragmentPipeline ? { runtimeFragmentsOnly: true } : {}),
               }, schedulerLease.signal);
             } catch (err) {
               schedulerLease.assertHeld('dispatching inline fallback for service batch');
@@ -1573,7 +1580,10 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
                   ? { onPersistedMonitor: inlineNotificationHandler }
                   : {}),
               });
-              if (fallbackBatch.stats.processedCount === 0 && ids.length > 0) {
+              if (activeRuntimeFragmentPipeline) {
+                requiresRuntimeSnapshotRebuild = true;
+                requiresFullHomepageRefresh = true;
+              } else if (fallbackBatch.stats.processedCount === 0 && ids.length > 0) {
                 requiresRuntimeSnapshotRebuild = true;
                 requiresFullHomepageRefresh = true;
               }
@@ -1641,12 +1651,23 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
       );
     }
 
-    ctx.waitUntil(
-      queueHomepageRefresh(
+    const queuePostCheckRefresh = () => {
+      if (activeRuntimeFragmentPipeline && !requiresFullHomepageRefresh) {
+        return refreshRuntimeFragmentsViaService(env)
+          .then(() => queueHomepageRefresh())
+          .catch(async (err) => {
+            console.warn('runtime fragments refresh: service refresh failed', err);
+            await queueHomepageRefresh();
+          });
+      }
+
+      return queueHomepageRefresh(
         requiresFullHomepageRefresh ? undefined : runtimeUpdates,
         requiresFullHomepageRefresh ? undefined : runtimeSnapshotBaseline,
-      ),
-    );
+      );
+    };
+
+    ctx.waitUntil(queuePostCheckRefresh());
   } catch (err) {
     if (err instanceof LeaseLostError) {
       console.warn(err.message);

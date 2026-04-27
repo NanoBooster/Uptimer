@@ -362,22 +362,70 @@ describe('scheduler/scheduled regression', () => {
     expect(refreshPublicHomepageSnapshotIfNeeded).not.toHaveBeenCalled();
   });
 
-  it('queues runtime-fragment refresh via service binding when enabled', async () => {
-    const env = createEnv({ dueRows: [] }) as unknown as Env;
+  it('uses runtime fragments as the scheduled post-check pipeline when enabled', async () => {
+    const checkedAt = Math.floor(Math.floor(Date.now() / 1000) / 60) * 60;
+    const dueRows = Array.from({ length: 7 }, (_, index) => ({
+      id: index + 1,
+      name: `API ${index + 1}`,
+      type: 'http',
+      target: `https://example.com/${index + 1}`,
+      interval_sec: 60,
+      created_at: 1_760_000_000 + index,
+      timeout_ms: 10_000,
+      http_method: 'GET',
+      http_headers_json: null,
+      http_body: null,
+      expected_status_json: null,
+      response_keyword: null,
+      response_keyword_mode: null,
+      response_forbidden_keyword: null,
+      response_forbidden_keyword_mode: null,
+      state_status: 'up',
+      state_last_error: null,
+      last_checked_at: checkedAt - 60,
+      last_changed_at: 1_760_000_000,
+      consecutive_failures: 0,
+      consecutive_successes: 1,
+    }));
+    const env = createEnv({ dueRows }) as unknown as Env;
     env.ADMIN_TOKEN = 'test-admin-token';
+    env.UPTIMER_PUBLIC_MONITOR_UPDATE_FRAGMENT_WRITES = '1';
     env.UPTIMER_SCHEDULED_RUNTIME_FRAGMENT_REFRESH = '1';
     const selfFetch = vi.fn(async (request: Request) => {
       const path = new URL(request.url).pathname;
-      if (path === '/api/v1/internal/refresh/runtime-fragments') {
+      if (path === '/api/v1/internal/scheduled/check-batch') {
         return new Response(
-          JSON.stringify({ ok: true, refreshed: true, update_count: 2 }),
+          JSON.stringify({
+            ok: true,
+            runtime_updates: [],
+            runtime_updates_fragmented: true,
+            processed_count: 1,
+            rejected_count: 0,
+            attempt_total: 1,
+            http_count: 1,
+            tcp_count: 0,
+            assertion_count: 0,
+            down_count: 0,
+            unknown_count: 0,
+            checks_duration_ms: 4,
+            persist_duration_ms: 2,
+          }),
           { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8' } },
         );
       }
-      return new Response(JSON.stringify({ ok: true, refreshed: true }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json; charset=utf-8' },
-      });
+      if (path === '/api/v1/internal/refresh/runtime-fragments') {
+        return new Response(
+          JSON.stringify({ ok: true, refreshed: true, update_count: 7 }),
+          { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8' } },
+        );
+      }
+      if (path === '/api/v1/internal/refresh/homepage') {
+        return new Response(JSON.stringify({ ok: true, refreshed: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        });
+      }
+      throw new Error(`unexpected self fetch: ${path}`);
     });
     env.SELF = { fetch: selfFetch } as unknown as Fetcher;
     const waitUntil = vi.fn();
@@ -385,21 +433,24 @@ describe('scheduler/scheduled regression', () => {
 
     await runScheduledTick(env, { waitUntil } as unknown as ExecutionContext);
 
-    expect(waitUntil).toHaveBeenCalledTimes(2);
+    expect(waitUntil).toHaveBeenCalledTimes(1);
     await Promise.all(waitUntil.mock.calls.map((call) => call[0] as Promise<unknown>));
 
     const requests = selfFetch.mock.calls.map((call) => call[0] as Request);
-    expect(requests.map((request) => new URL(request.url).pathname).sort()).toEqual([
-      '/api/v1/internal/refresh/homepage',
-      '/api/v1/internal/refresh/runtime-fragments',
-    ]);
-    const runtimeRequest = requests.find(
-      (request) => new URL(request.url).pathname === '/api/v1/internal/refresh/runtime-fragments',
+    const checkBatchRequests = requests.filter(
+      (request) => new URL(request.url).pathname === '/api/v1/internal/scheduled/check-batch',
     );
-    expect(runtimeRequest?.method).toBe('POST');
-    expect(runtimeRequest?.headers.get('Authorization')).toBe('Bearer test-admin-token');
+    expect(checkBatchRequests).toHaveLength(2);
+    expect(checkBatchRequests.every((request) => request.headers.get('X-Uptimer-Runtime-Fragments-Only') === '1')).toBe(true);
+    expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
+      '/api/v1/internal/scheduled/check-batch',
+      '/api/v1/internal/scheduled/check-batch',
+      '/api/v1/internal/refresh/runtime-fragments',
+      '/api/v1/internal/refresh/homepage',
+    ]);
+    expect(refreshPublicMonitorRuntimeSnapshot).not.toHaveBeenCalled();
     expect(logSpy).toHaveBeenCalledWith(
-      'scheduled: runtime_fragments_refresh route=internal/refresh/runtime-fragments refreshed=1 update_count=2',
+      'scheduled: runtime_fragments_refresh route=internal/refresh/runtime-fragments refreshed=1 update_count=7',
     );
     logSpy.mockRestore();
   });

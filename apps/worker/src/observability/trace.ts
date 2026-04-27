@@ -11,6 +11,13 @@ function normalizeTruthyHeader(value: string | undefined): boolean {
   return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
 }
 
+function normalizeFalsyHeader(value: string | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized === '0' || normalized === 'false' || normalized === 'no' || normalized === 'off';
+}
+
 function readTraceToken(env: Record<string, unknown> | undefined): string | null {
   if (!env) return null;
   const raw = env['UPTIMER_TRACE_TOKEN'] ?? env['TRACE_TOKEN'];
@@ -23,6 +30,7 @@ export type TraceOptions = {
   enabled: boolean;
   id: string;
   mode: string | null;
+  timingsEnabled?: boolean;
 };
 
 export function resolveTraceOptions(opts: {
@@ -34,17 +42,17 @@ export function resolveTraceOptions(opts: {
   const mode = typeof modeRaw === 'string' && modeRaw.trim().length > 0 ? modeRaw.trim() : null;
 
   if (!enabled) {
-    return { enabled: false, id: '', mode };
+    return { enabled: false, id: '', mode, timingsEnabled: false };
   }
 
   const token = readTraceToken(opts.env);
   if (!token) {
-    return { enabled: false, id: '', mode };
+    return { enabled: false, id: '', mode, timingsEnabled: false };
   }
 
   const provided = opts.header(TRACE_TOKEN_HEADER) ?? '';
   if (provided !== token) {
-    return { enabled: false, id: '', mode };
+    return { enabled: false, id: '', mode, timingsEnabled: false };
   }
 
   const idFromHeader = opts.header(TRACE_ID_HEADER);
@@ -53,7 +61,11 @@ export function resolveTraceOptions(opts: {
       ? idFromHeader.trim()
       : crypto.randomUUID();
 
-  return { enabled: true, id, mode };
+  const timingsRaw = opts.env?.['UPTIMER_TRACE_TIMINGS'];
+  const timingsEnabled =
+    typeof timingsRaw === 'string' ? !normalizeFalsyHeader(timingsRaw) : true;
+
+  return { enabled: true, id, mode, timingsEnabled };
 }
 
 function formatServerTimingMetric(name: string, durMs: number): string {
@@ -66,6 +78,7 @@ export class Trace {
   readonly enabled: boolean;
   readonly id: string;
   readonly mode: string | null;
+  readonly timingsEnabled: boolean;
 
   #t0: number;
   #spans: Array<{ name: string; durMs: number }> = [];
@@ -75,7 +88,8 @@ export class Trace {
     this.enabled = opts.enabled;
     this.id = opts.id;
     this.mode = opts.mode;
-    this.#t0 = this.enabled ? performance.now() : 0;
+    this.timingsEnabled = opts.enabled && opts.timingsEnabled !== false;
+    this.#t0 = this.timingsEnabled ? performance.now() : 0;
   }
 
   setLabel(key: string, value: string | number | boolean | null | undefined): void {
@@ -88,13 +102,13 @@ export class Trace {
   }
 
   addSpan(name: string, durMs: number): void {
-    if (!this.enabled) return;
+    if (!this.timingsEnabled) return;
     if (!name) return;
     this.#spans.push({ name, durMs });
   }
 
   time<T>(name: string, fn: () => T): T {
-    if (!this.enabled) return fn();
+    if (!this.timingsEnabled) return fn();
     const t0 = performance.now();
     const out = fn();
     const t1 = performance.now();
@@ -103,7 +117,7 @@ export class Trace {
   }
 
   async timeAsync<T>(name: string, fn: () => Promise<T>): Promise<T> {
-    if (!this.enabled) return fn();
+    if (!this.timingsEnabled) return fn();
     const t0 = performance.now();
     try {
       return await fn();
@@ -114,13 +128,13 @@ export class Trace {
   }
 
   finish(totalName = 'total'): void {
-    if (!this.enabled) return;
+    if (!this.timingsEnabled) return;
     const t1 = performance.now();
     this.addSpan(totalName, t1 - this.#t0);
   }
 
   toServerTiming(prefix?: string): string {
-    if (!this.enabled) return '';
+    if (!this.enabled || !this.timingsEnabled) return '';
     const trimmedPrefix = prefix ? prefix.trim() : '';
     const prefixValue = trimmedPrefix.length > 0 ? `${trimmedPrefix}_` : '';
     return this.#spans

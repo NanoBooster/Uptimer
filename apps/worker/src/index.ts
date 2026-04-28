@@ -112,6 +112,11 @@ const internalRefreshJsonBodySchema = z.object({
   runtime_updates: z.array(z.unknown()).optional(),
 });
 
+const internalShardedPublicSnapshotBodySchema = z.object({
+  kind: z.enum(['homepage', 'status']),
+  measure_body_bytes: z.boolean().optional().default(false),
+});
+
 type InternalScheduledCheckBatchBody = {
   token?: string;
   ids: number[];
@@ -351,6 +356,56 @@ async function handleInternalHomepageRefresh(request: Request, env: Env): Promis
     { refreshed: result.refreshed, ...(result.error ? { error: true } : {}) },
   );
 }
+async function handleInternalShardedPublicSnapshotAssemble(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  if (!isInternalServiceRequest(request)) {
+    return buildNotFoundJsonResponse(request.headers.get('Origin'));
+  }
+  if (request.method !== 'POST') {
+    return new Response('Method Not Allowed', { status: 405 });
+  }
+  if (!normalizeTruthyHeader(env.UPTIMER_PUBLIC_SHARDED_ASSEMBLER ?? null)) {
+    return buildNotFoundJsonResponse(request.headers.get('Origin'));
+  }
+  if (!hasValidInternalAuth(request, env)) {
+    return new Response('Forbidden', { status: 403 });
+  }
+  if (isRequestBodyTooLarge(request)) {
+    return new Response('Payload Too Large', { status: 413 });
+  }
+
+  const body = await request.json().catch(() => null);
+  const parsed = internalShardedPublicSnapshotBodySchema.safeParse(body);
+  if (!parsed.success) {
+    return new Response('Bad Request', { status: 400 });
+  }
+
+  const { assembleShardedPublicSnapshot } = await import(
+    './internal/sharded-public-snapshot-core'
+  );
+  const result = await assembleShardedPublicSnapshot({
+    env,
+    kind: parsed.data.kind,
+    measureBodyBytes: parsed.data.measure_body_bytes,
+  });
+  return buildInternalJsonResponse(
+    {
+      ok: result.ok,
+      assembled: result.assembled,
+      kind: result.kind,
+      monitor_count: result.monitorCount,
+      invalid_count: result.invalidCount,
+      stale_count: result.staleCount,
+      ...(result.generatedAt !== undefined ? { generated_at: result.generatedAt } : {}),
+      ...(result.bodyBytes !== undefined ? { body_bytes: result.bodyBytes } : {}),
+      ...(result.skip ? { skip: result.skip } : {}),
+    },
+    result.ok,
+  );
+}
+
 async function handleInternalRuntimeFragmentsRefresh(
   request: Request,
   env: Env,
@@ -583,6 +638,9 @@ export default {
     }
     if (url.pathname === '/api/v1/internal/refresh/runtime-fragments') {
       return handleInternalRuntimeFragmentsRefresh(request, env);
+    }
+    if (url.pathname === '/api/v1/internal/assemble/sharded-public-snapshot') {
+      return handleInternalShardedPublicSnapshotAssemble(request, env);
     }
 
     const mod = await import('./fetch-handler');

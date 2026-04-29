@@ -154,6 +154,20 @@ function shouldTraceScheduledRefresh(env: Env): boolean {
   );
 }
 
+function shouldLogScheduledRefresh(env: Env): boolean {
+  const raw = (env as unknown as Record<string, unknown>).UPTIMER_SCHEDULED_REFRESH_LOGS;
+  if (typeof raw !== 'string') {
+    return true;
+  }
+  const normalized = raw.trim().toLowerCase();
+  return !(
+    normalized === '0' ||
+    normalized === 'false' ||
+    normalized === 'no' ||
+    normalized === 'off'
+  );
+}
+
 function shouldRefreshHomepageDirect(env: Env): boolean {
   const rawEnv = env as unknown as Record<string, unknown>;
   return isTruthyEnvFlag(rawEnv.UPTIMER_SCHEDULED_HOMEPAGE_DIRECT);
@@ -557,11 +571,13 @@ async function startShardedPublicSnapshotContinuationViaService(
   if (!res.ok) {
     throw new Error(`sharded public snapshot continuation failed: HTTP ${res.status} ${bodyText}`.trim());
   }
-  const parsed = parseJsonObject(bodyText);
-  const continued = typeof parsed?.continued === 'boolean' ? parsed.continued : null;
-  console.log(
-    `scheduled: sharded_continuation_start step=${String(body.step)} continued=${continued === null ? '-' : continued ? 1 : 0}`,
-  );
+  if (shouldLogScheduledRefresh(env)) {
+    const parsed = parseJsonObject(bodyText);
+    const continued = typeof parsed?.continued === 'boolean' ? parsed.continued : null;
+    console.log(
+      `scheduled: sharded_continuation_start step=${String(body.step)} continued=${continued === null ? '-' : continued ? 1 : 0}`,
+    );
+  }
 }
 
 async function refreshHomepageSnapshotViaService(
@@ -1721,9 +1737,11 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
     runtimeSnapshotBaseline?: PublicMonitorRuntimeSnapshot,
   ) => {
     if (shouldSkipScheduledHomepageRefreshForShardedSnapshots(env)) {
-      console.log(
-        `scheduled: homepage_refresh_skip reason=sharded_public_snapshots runtime_updates=${runtimeUpdates?.length ?? 0}`,
-      );
+      if (shouldLogScheduledRefresh(env)) {
+        console.log(
+          `scheduled: homepage_refresh_skip reason=sharded_public_snapshots runtime_updates=${runtimeUpdates?.length ?? 0}`,
+        );
+      }
       return shouldUseScheduledShardedContinuation(env)
         ? startShardedPublicSnapshotContinuationViaService(env, { refreshRuntimeFragments: false })
             .catch((err) => {
@@ -1998,7 +2016,7 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
       console.error(
         `scheduled: ${aggregateStats.rejectedCount}/${due.length} monitors failed at ${checkedAt} attempts=${aggregateStats.attemptTotal} http=${aggregateStats.httpCount} tcp=${aggregateStats.tcpCount} assertions=${aggregateStats.assertionCount} down=${aggregateStats.downCount} unknown=${aggregateStats.unknownCount} batch_mode=${batchMode} batch_count=${batchCount} dur_setup=${setupDurMs.toFixed(2)} dur_checks=${checksDurMs.toFixed(2)} dur_persist=${persistDurMs.toFixed(2)} dur_batch=${batchWallDurMs.toFixed(2)} dur_runtime=${runtimeSnapshotDurMs.toFixed(2)} dur_total=${(performance.now() - totalStart).toFixed(2)}`,
       );
-    } else {
+    } else if (shouldLogScheduledRefresh(env)) {
       console.log(
         `scheduled: processed ${aggregateStats.processedCount} monitors at ${checkedAt} attempts=${aggregateStats.attemptTotal} http=${aggregateStats.httpCount} tcp=${aggregateStats.tcpCount} assertions=${aggregateStats.assertionCount} down=${aggregateStats.downCount} unknown=${aggregateStats.unknownCount} batch_mode=${batchMode} batch_count=${batchCount} dur_setup=${setupDurMs.toFixed(2)} dur_checks=${checksDurMs.toFixed(2)} dur_persist=${persistDurMs.toFixed(2)} dur_batch=${batchWallDurMs.toFixed(2)} dur_runtime=${runtimeSnapshotDurMs.toFixed(2)} dur_total=${(performance.now() - totalStart).toFixed(2)}`,
       );

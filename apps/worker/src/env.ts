@@ -38,6 +38,7 @@ export interface Env {
   UPTIMER_INTERNAL_SCHEDULED_CHECK_BATCH_TIMEOUT_MS?: string;
   UPTIMER_INTERNAL_CHECK_BATCH_FRAGMENT_WRITE_SPLIT?: string;
   UPTIMER_INTERNAL_CHECK_BATCH_DIAGNOSTICS?: string;
+  UPTIMER_SCHEDULED_REFRESH_LOGS?: string;
 
   // In-memory, per-instance rate limit for admin endpoints.
   // Keep optional so older deployments don't break.

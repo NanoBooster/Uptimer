@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 import { AppError } from '../middleware/errors';
 import type { Trace } from '../observability/trace';
 import { acquireLease, releaseLease } from '../scheduler/lock';
@@ -10,10 +12,18 @@ import {
   publicHomepageStoredRenderArtifactSchema,
   type StoredPublicHomepageRenderArtifact,
 } from '../schemas/public-homepage';
+import type { PublicSnapshotFragmentRow } from './public-fragments';
 
 const SNAPSHOT_KEY = 'homepage';
 const SNAPSHOT_ARTIFACT_KEY = 'homepage:artifact';
 export const HOMEPAGE_ARTIFACT_MONITOR_FRAGMENTS_KEY = 'homepage:artifact:monitors';
+
+const homepageArtifactMonitorFragmentSchema = z.object({
+  id: z.number().int().positive(),
+  name: z.string(),
+  group_name: z.string().min(1).nullable(),
+  card_html: z.string().min(1),
+});
 const MAX_AGE_SECONDS = 60;
 const MAX_STALE_SECONDS = 10 * 60;
 const REFRESH_LOCK_NAME = 'snapshot:homepage:refresh';
@@ -307,6 +317,18 @@ export function renderHomepageMonitorPreloadCardFragment(
   return renderHomepageMonitorPreloadCard(monitor, formatTimestamp);
 }
 
+export type HomepageArtifactMonitorFragment = z.infer<
+  typeof homepageArtifactMonitorFragmentSchema
+>;
+
+export type HomepageArtifactMonitorFragmentParseResult = {
+  cardHtmlByMonitorId: Map<number, string>;
+  monitorNameById: Map<number, string>;
+  invalidCount: number;
+  staleCount: number;
+  missingCount: number;
+};
+
 export function buildHomepageArtifactMonitorFragmentWrites(
   payload: PublicHomepageResponse,
   updatedAt: number,
@@ -337,6 +359,7 @@ export function buildHomepageArtifactMonitorFragmentWrites(
       generatedAt: payload.generated_at,
       bodyJson: JSON.stringify({
         id: monitor.id,
+        name: monitor.name,
         group_name: monitor.group_name,
         card_html: renderHomepageMonitorPreloadCardFragment(monitor),
       }),
@@ -347,9 +370,71 @@ export function buildHomepageArtifactMonitorFragmentWrites(
   return writes;
 }
 
+function parseHomepageArtifactMonitorFragmentKey(fragmentKey: string): number | null {
+  if (!fragmentKey.startsWith('monitor:')) {
+    return null;
+  }
+  const parsed = Number.parseInt(fragmentKey.slice('monitor:'.length), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+export function parseHomepageArtifactMonitorFragmentRows(
+  rows: readonly PublicSnapshotFragmentRow[],
+  snapshot: PublicHomepageResponse,
+): HomepageArtifactMonitorFragmentParseResult {
+  const cardHtmlByMonitorId = new Map<number, string>();
+  const monitorNameById = new Map<number, string>();
+  const expectedMonitorIds = new Set(snapshot.monitors.map((monitor) => monitor.id));
+  let invalidCount = 0;
+  let staleCount = 0;
+
+  for (const row of rows) {
+    const monitorId = parseHomepageArtifactMonitorFragmentKey(row.fragment_key);
+    if (monitorId === null || !expectedMonitorIds.has(monitorId)) {
+      invalidCount += 1;
+      continue;
+    }
+    if (row.generated_at !== snapshot.generated_at) {
+      staleCount += 1;
+      continue;
+    }
+
+    let raw: unknown;
+    try {
+      raw = JSON.parse(row.body_json) as unknown;
+    } catch {
+      invalidCount += 1;
+      continue;
+    }
+    const parsed = homepageArtifactMonitorFragmentSchema.safeParse(raw);
+    if (!parsed.success || parsed.data.id !== monitorId) {
+      invalidCount += 1;
+      continue;
+    }
+    cardHtmlByMonitorId.set(monitorId, parsed.data.card_html);
+    monitorNameById.set(monitorId, parsed.data.name);
+  }
+
+  let missingCount = 0;
+  for (const monitorId of expectedMonitorIds) {
+    if (!cardHtmlByMonitorId.has(monitorId)) {
+      missingCount += 1;
+    }
+  }
+
+  return {
+    cardHtmlByMonitorId,
+    monitorNameById,
+    invalidCount,
+    staleCount,
+    missingCount,
+  };
+}
+
 function renderPreload(
   snapshot: PublicHomepageResponse,
   monitorNameById?: ReadonlyMap<number, string>,
+  monitorCardHtmlById?: ReadonlyMap<number, string>,
 ): string {
   const overall = snapshot.overall_status;
   const siteTitle = snapshot.site_title;
@@ -377,7 +462,10 @@ function renderPreload(
   for (const [groupName, groupMonitors] of groups.entries()) {
     const monitorCardsParts: string[] = [];
     for (const monitor of groupMonitors) {
-      monitorCardsParts.push(renderHomepageMonitorPreloadCard(monitor, formatTimestamp));
+      monitorCardsParts.push(
+        monitorCardHtmlById?.get(monitor.id) ??
+          renderHomepageMonitorPreloadCard(monitor, formatTimestamp),
+      );
     }
 
     groupedMonitorsParts.push(
@@ -428,20 +516,28 @@ function renderPreload(
   return `<div class="hp"><header class="uh"><div class="uw uhw"><div class="ut"><div class="un">${escapeHtml(siteTitle)}</div>${descriptionHtml}</div><span class="sb sb-${overall}">${escapeHtml(overall)}</span></div></header><main class="uw um"><section class="bn"><div class="bt">${escapeHtml(bannerTitle)}</div><div class="bu">Updated: ${formatTimestamp(generatedAt)}</div></section>${maintenanceSection}${incidentSection}<section class="sec"><h3 class="sh">Services</h3>${groupedMonitorsParts.join('')}</section><section class="sec ih"><div><h3 class="sh">Incident History</h3>${incidentHistory}</div><div><h3 class="sh">Maintenance History</h3>${maintenanceHistory}</div></section></main></div>`;
 }
 
-export function buildHomepageRenderArtifact(
-  snapshot: PublicHomepageResponse,
-): StoredPublicHomepageRenderArtifact {
-  const fullSnapshot: PublicHomepageResponse = {
+function toFullHomepageSnapshot(snapshot: PublicHomepageResponse): PublicHomepageResponse {
+  return {
     ...snapshot,
     bootstrap_mode: 'full',
     monitor_count_total: snapshot.monitors.length,
   };
+}
+
+function buildHomepageRenderArtifactWithPreloadOptions(
+  snapshot: PublicHomepageResponse,
+  opts: {
+    monitorNameById?: ReadonlyMap<number, string>;
+    monitorCardHtmlById?: ReadonlyMap<number, string>;
+  } = {},
+): StoredPublicHomepageRenderArtifact {
+  const fullSnapshot = toFullHomepageSnapshot(snapshot);
   const needsMonitorNames =
     fullSnapshot.maintenance_windows.active.length > 0 ||
     fullSnapshot.maintenance_windows.upcoming.length > 0 ||
     fullSnapshot.maintenance_history_preview !== null;
   const allMonitorNames = needsMonitorNames
-    ? new Map(fullSnapshot.monitors.map((monitor) => [monitor.id, monitor.name]))
+    ? opts.monitorNameById ?? new Map(fullSnapshot.monitors.map((monitor) => [monitor.id, monitor.name]))
     : undefined;
   const metaTitle = normalizeSnapshotText(fullSnapshot.site_title, 'Uptimer');
   const fallbackDescription = normalizeSnapshotText(
@@ -454,10 +550,41 @@ export function buildHomepageRenderArtifact(
 
   return {
     generated_at: fullSnapshot.generated_at,
-    preload_html: `<div id="uptimer-preload">${renderPreload(fullSnapshot, allMonitorNames)}</div>`,
+    preload_html: `<div id="uptimer-preload">${renderPreload(
+      fullSnapshot,
+      allMonitorNames,
+      opts.monitorCardHtmlById,
+    )}</div>`,
     snapshot: fullSnapshot,
     meta_title: metaTitle,
     meta_description: metaDescription,
+  };
+}
+
+export function buildHomepageRenderArtifact(
+  snapshot: PublicHomepageResponse,
+): StoredPublicHomepageRenderArtifact {
+  return buildHomepageRenderArtifactWithPreloadOptions(snapshot);
+}
+
+export function buildHomepageRenderArtifactFromMonitorFragments(
+  snapshot: PublicHomepageResponse,
+  rows: readonly PublicSnapshotFragmentRow[],
+): { artifact: StoredPublicHomepageRenderArtifact | null } & HomepageArtifactMonitorFragmentParseResult {
+  const parsed = parseHomepageArtifactMonitorFragmentRows(rows, snapshot);
+  if (parsed.missingCount > 0 || parsed.staleCount > 0 || parsed.invalidCount > 0) {
+    return {
+      ...parsed,
+      artifact: null,
+    };
+  }
+
+  return {
+    ...parsed,
+    artifact: buildHomepageRenderArtifactWithPreloadOptions(snapshot, {
+      monitorNameById: parsed.monitorNameById,
+      monitorCardHtmlById: parsed.cardHtmlByMonitorId,
+    }),
   };
 }
 

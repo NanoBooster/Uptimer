@@ -369,6 +369,139 @@ describe('internal sharded public snapshot assembler route', () => {
     expect(artifact.snapshot).toMatchObject({ generated_at: 1_700_000_000 });
   });
 
+  it('publishes homepage artifact from pre-rendered monitor fragments when enabled', async () => {
+    const writes: unknown[][] = [];
+    const homepage = homepagePayload();
+    const homepageEnvelope = buildHomepageEnvelopeFragmentWrite(homepage, 1_700_000_005);
+    const homepageMonitors = buildHomepageMonitorFragmentWrites(homepage, 1_700_000_005);
+    const artifactRow = {
+      fragment_key: 'monitor:1',
+      generated_at: homepage.generated_at,
+      body_json: JSON.stringify({
+        id: 1,
+        name: 'API',
+        group_name: null,
+        card_html: '<article class="card">PRE-RENDERED API</article>',
+      }),
+      updated_at: 1_700_000_005,
+    };
+    const env = {
+      DB: createFakeD1Database([
+        {
+          match: 'from public_snapshot_fragments',
+          all: (args) => {
+            switch (args[0]) {
+              case HOMEPAGE_ENVELOPE_FRAGMENT_KEY:
+                return [toRow(homepageEnvelope)];
+              case HOMEPAGE_MONITOR_FRAGMENTS_KEY:
+                return homepageMonitors.map(toRow);
+              case HOMEPAGE_ARTIFACT_MONITOR_FRAGMENTS_KEY:
+                return [artifactRow];
+              default:
+                return [];
+            }
+          },
+        },
+        {
+          match: 'insert into public_snapshots',
+          run: (args) => {
+            writes.push(args);
+            return { meta: { changes: 1 } };
+          },
+        },
+      ]),
+      ADMIN_TOKEN: 'test-admin-token',
+      UPTIMER_PUBLIC_SHARDED_ASSEMBLER: '1',
+      UPTIMER_PUBLIC_SHARDED_SNAPSHOT_PUBLISH: '1',
+      UPTIMER_PUBLIC_HOMEPAGE_ARTIFACT_FRAGMENT_WRITES: '1',
+    } as unknown as Env;
+
+    const res = await worker.fetch(
+      new Request('http://internal/api/v1/internal/assemble/sharded-public-snapshot', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-admin-token',
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify({ kind: 'homepage', assembly: 'json', publish: true }),
+      }),
+      env,
+      { waitUntil: vi.fn() } as unknown as ExecutionContext,
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      ok: true,
+      assembled: true,
+      artifact_published: true,
+      write_count: 2,
+    });
+    expect(writes.map((args) => args[0])).toEqual(['homepage', 'homepage:artifact']);
+    const artifact = JSON.parse(writes[1]![2] as string) as { preload_html?: string; snapshot?: unknown };
+    expect(artifact.preload_html).toContain('PRE-RENDERED API');
+    expect(artifact.snapshot).toMatchObject({ generated_at: homepage.generated_at });
+  });
+
+  it('skips homepage artifact publish when pre-rendered monitor fragments are incomplete', async () => {
+    const writes: unknown[][] = [];
+    const homepage = homepagePayload();
+    const homepageEnvelope = buildHomepageEnvelopeFragmentWrite(homepage, 1_700_000_005);
+    const homepageMonitors = buildHomepageMonitorFragmentWrites(homepage, 1_700_000_005);
+    const env = {
+      DB: createFakeD1Database([
+        {
+          match: 'from public_snapshot_fragments',
+          all: (args) => {
+            switch (args[0]) {
+              case HOMEPAGE_ENVELOPE_FRAGMENT_KEY:
+                return [toRow(homepageEnvelope)];
+              case HOMEPAGE_MONITOR_FRAGMENTS_KEY:
+                return homepageMonitors.map(toRow);
+              case HOMEPAGE_ARTIFACT_MONITOR_FRAGMENTS_KEY:
+                return [];
+              default:
+                return [];
+            }
+          },
+        },
+        {
+          match: 'insert into public_snapshots',
+          run: (args) => {
+            writes.push(args);
+            return { meta: { changes: 1 } };
+          },
+        },
+      ]),
+      ADMIN_TOKEN: 'test-admin-token',
+      UPTIMER_PUBLIC_SHARDED_ASSEMBLER: '1',
+      UPTIMER_PUBLIC_SHARDED_SNAPSHOT_PUBLISH: '1',
+      UPTIMER_PUBLIC_HOMEPAGE_ARTIFACT_FRAGMENT_WRITES: '1',
+    } as unknown as Env;
+
+    const res = await worker.fetch(
+      new Request('http://internal/api/v1/internal/assemble/sharded-public-snapshot', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-admin-token',
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify({ kind: 'homepage', assembly: 'json', publish: true }),
+      }),
+      env,
+      { waitUntil: vi.fn() } as unknown as ExecutionContext,
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      ok: true,
+      assembled: true,
+      published: true,
+      artifact_published: false,
+      write_count: 1,
+    });
+    expect(writes.map((args) => args[0])).toEqual(['homepage']);
+  });
+
   it('assembles fragment JSON without parsing every monitor when requested', async () => {
     const res = await worker.fetch(
       new Request('http://internal/api/v1/internal/assemble/sharded-public-snapshot', {

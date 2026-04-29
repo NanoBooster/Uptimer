@@ -81,7 +81,12 @@ export type ShardedHomepageArtifactPublishResult = {
   generatedAt?: number;
   monitorCount: number;
   writeCount: number;
-  skip?: 'missing_homepage' | 'stale_homepage' | 'current_artifact' | 'invalid_payload';
+  skip?:
+    | 'missing_homepage'
+    | 'stale_homepage'
+    | 'current_artifact'
+    | 'invalid_payload'
+    | 'missing_artifact_fragments';
   error?: boolean;
   errorName?: string;
   errorMessage?: string;
@@ -272,7 +277,14 @@ async function publishRawHomepageArtifactSnapshot(opts: {
     };
   }
 
-  const [{ publicHomepageResponseSchema }, { buildHomepageRenderArtifact }] = await Promise.all([
+  const [
+    { publicHomepageResponseSchema },
+    {
+      HOMEPAGE_ARTIFACT_MONITOR_FRAGMENTS_KEY,
+      buildHomepageRenderArtifact,
+      buildHomepageRenderArtifactFromMonitorFragments,
+    },
+  ] = await Promise.all([
     import('../schemas/public-homepage'),
     import('../snapshots/public-homepage'),
   ]);
@@ -288,7 +300,29 @@ async function publishRawHomepageArtifactSnapshot(opts: {
     };
   }
 
-  const artifact = buildHomepageRenderArtifact(parsed.data);
+  let artifact: ReturnType<typeof buildHomepageRenderArtifact> | null = null;
+  if (shouldWriteHomepageArtifactFragments(opts.env)) {
+    const { readPublicSnapshotFragments } = await import('../snapshots/public-fragments');
+    const rows = await readPublicSnapshotFragments(
+      opts.env.DB,
+      HOMEPAGE_ARTIFACT_MONITOR_FRAGMENTS_KEY,
+    );
+    const preRendered = buildHomepageRenderArtifactFromMonitorFragments(parsed.data, rows);
+    artifact = preRendered.artifact;
+    if (!artifact) {
+      return {
+        ok: true,
+        published: false,
+        artifactPublished: false,
+        generatedAt: parsed.data.generated_at,
+        monitorCount: parsed.data.monitors.length,
+        writeCount: 0,
+        skip: 'missing_artifact_fragments',
+      };
+    }
+  } else {
+    artifact = buildHomepageRenderArtifact(parsed.data);
+  }
   const updatedAt = Math.max(opts.now, Math.floor(Date.now() / 1000));
   const result = await rawPublicSnapshotUpsertStatement(
     opts.env.DB,
